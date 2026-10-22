@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>乱码考古学家 · Mojibake Archaeologist</title>
+  <meta name="description" content="把乱码当文物：在浏览器里逐字节还原 UTF-8、GBK、Latin-1、Shift_JIS 等编码错误，画出字节地层剖面，并由博物馆讲解员讲述这段乱码的前世今生。纯前端，零依赖，离线可用。">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f4ecda" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#100f0c" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2317140f'/%3E%3Ccircle cx='32' cy='32' r='26' fill='none' stroke='%23d4ad5f' stroke-width='3'/%3E%3Cpath d='M18 35 25 17 33 22 45 15 46 35Z' fill='%23d4ad5f'/%3E%3Cpath d='M25 17 28 27 26 35M33 22 35 30' stroke='%2317140f' stroke-width='2' fill='none'/%3E%3Crect x='18' y='40' width='8' height='8' rx='2' fill='%235fc2b0'/%3E%3Crect x='28' y='40' width='8' height='8' rx='2' fill='%235fc2b0' opacity='.7'/%3E%3Crect x='38' y='40' width='8' height='8' rx='2' fill='%235fc2b0' opacity='.4'/%3E%3C/svg%3E">
+  <!-- Web fonts are optional garnish: every stack below falls back to good system fonts offline. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&amp;family=Noto+Serif+SC:wght@600;900&amp;display=swap">
+  <link rel="stylesheet" href="assets/styles.css">
+  <script>
+    // Apply the saved theme before first paint so a light-theme visitor never sees a dark flash.
+    (function () {
+      try {
+        var prefs = JSON.parse(localStorage.getItem('mbx.prefs') || '{}');
+        if (prefs.theme === 'light' || prefs.theme === 'dark') document.documentElement.setAttribute('data-theme', prefs.theme);
+        if (prefs.animation === false) document.documentElement.classList.add('no-motion');
+      } catch (e) { /* storage unavailable: stay on auto */ }
+    })();
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+
+  <header class="masthead">
+    <div class="masthead__inner wrap">
+      <div class="brand">
+        <svg class="brand__seal" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+          <circle class="seal-ring" cx="32" cy="32" r="29"></circle>
+          <circle class="seal-ring seal-ring--thin" cx="32" cy="32" r="24"></circle>
+          <path class="seal-shard" d="M18 36 L25 17 L33 22 L45 15 L46 36 Z"></path>
+          <path class="seal-crack" d="M25 17 L28 27 L26 36 M33 22 L35 30"></path>
+          <rect class="seal-byte" x="18" y="40" width="8" height="8" rx="2"></rect>
+          <rect class="seal-byte seal-byte--2" x="28" y="40" width="8" height="8" rx="2"></rect>
+          <rect class="seal-byte seal-byte--3" x="38" y="40" width="8" height="8" rx="2"></rect>
+        </svg>
+        <div class="brand__text">
+          <p class="brand__kicker">编码博物馆 · 数字文物修复所</p>
+          <h1 class="brand__title">乱码考古学家</h1>
+          <p class="brand__en">Mojibake Archaeologist</p>
+        </div>
+      </div>
+      <p class="brand__slogan">每一段乱码，都是一串被误读的字节。<br class="hide-sm">我们把它挖出来、擦干净，再讲讲它的前世今生。</p>
+      <div class="masthead__tools">
+        <button type="button" class="icon-btn" id="themeToggle" aria-label="切换明暗主题" title="切换明暗主题">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path class="icon-moon" d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z"></path><g class="icon-sun"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"></path></g></svg>
+        </button>
+        <button type="button" class="icon-btn icon-btn--label" id="openSettings" aria-haspopup="dialog" aria-label="馆务设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2.2"></circle><circle cx="10" cy="17" r="2.2"></circle></svg>
+          <span>馆务设置</span>
+        </button>
+      </div>
+    </div>
+    <div class="brass-rule" aria-hidden="true"></div>
+  </header>
+
+  <div id="moduleNotice" class="module-notice wrap" role="alert" hidden></div>
+
+  <main id="main" class="wrap" tabindex="-1">
+    <!-- 展厅 01：出土区 -->
+    <section class="hall hall--dig" id="digHall" aria-labelledby="digTitle">
+      <div class="hall__head">
+        <span class="hall__no">展厅 01</span>
+        <h2 class="hall__title" id="digTitle">出土区</h2>
+        <p class="hall__en">Excavation Site</p>
+      </div>
+
+      <div class="dig-grid">
+        <form class="dig-form panel" id="digForm" novalidate>
+          <label class="field-label" for="relicInput">把你遇到的乱码放进探方</label>
+          <p class="field-hint" id="relicHint">例如 <code>å¤§å®¶å¥½</code>、<code>浣犲ソ锛屼笘鐣�</code>、<code>%E5%A4%A7</code>，或者一整段看不懂的字。</p>
+          <textarea id="relicInput" class="relic-input" rows="6" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="relicHint relicCount" placeholder="在此粘贴乱码……"></textarea>
+          <div class="dig-actions">
+            <button type="submit" class="btn btn--primary" id="digButton">
+              <svg class="btn__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14.5 3.5l6 6-9.8 9.8a3 3 0 0 1-4.2 0l-1.8-1.8a3 3 0 0 1 0-4.2z"></path><path d="M3 21l3.2-3.2"></path></svg>
+              <span>开始发掘</span>
+              <kbd class="kbd" id="digShortcut">Ctrl+Enter</kbd>
+            </button>
+            <button type="button" class="btn btn--ghost" id="clearInput">清空</button>
+            <button type="button" class="btn btn--ghost" id="copyShare">复制分享链接</button>
+            <span class="char-count" id="relicCount" aria-live="off">0 字</span>
+          </div>
+          <details class="dig-params" id="digParams">
+            <summary>发掘参数</summary>
+            <div class="params-grid">
+              <label class="param">
+                <span>最大地层数</span>
+                <select id="optDepth">
+                  <option value="1">1 层</option>
+                  <option value="2">2 层</option>
+                  <option value="3" selected>3 层</option>
+                  <option value="4">4 层</option>
+                </select>
+              </label>
+              <label class="check"><input type="checkbox" id="optLossy" checked> <span>残缺修复（补全丢失字节）</span></label>
+              <label class="check"><input type="checkbox" id="optEscapes" checked> <span>识别转义层（%XX、\x、&amp;#…;）</span></label>
+              <label class="check"><input type="checkbox" id="optPartial" checked> <span>局部修复（只救得回一部分时）</span></label>
+            </div>
+          </details>
+        </form>
+
+        <section class="gallery" aria-labelledby="galleryTitle">
+          <div class="gallery__head">
+            <h3 class="sub-title" id="galleryTitle">馆藏精选</h3>
+            <p class="sub-en">Highlights of the Collection</p>
+          </div>
+          <p class="gallery__hint">点一件展品，自动填入并发掘。</p>
+          <ul class="gallery__list" id="galleryList"></ul>
+          <button type="button" class="btn btn--ghost btn--small gallery__more" id="galleryMore" hidden aria-expanded="false" aria-controls="galleryList"></button>
+        </section>
+      </div>
+    </section>
+
+    <!-- 发掘动画 -->
+    <section class="excavation panel" id="excavation" aria-labelledby="excTitle" hidden>
+      <h2 class="sr-only" id="excTitle">发掘进行中</h2>
+      <div class="dig-site" aria-hidden="true">
+        <div class="dig-site__strata"></div>
+        <div class="dig-site__relic" id="digRelic"></div>
+        <div class="dig-site__dirt"></div>
+        <div class="dig-site__brush">
+          <svg viewBox="0 0 80 40" focusable="false"><rect class="brush-handle" x="2" y="16" width="42" height="8" rx="4"></rect><rect class="brush-ferrule" x="42" y="13" width="10" height="14" rx="2"></rect><path class="brush-bristles" d="M52 12 C64 10 74 14 78 20 C74 26 64 30 52 28 Z"></path></svg>
+        </div>
+        <span class="dust dust--1"></span><span class="dust dust--2"></span><span class="dust dust--3"></span>
+        <span class="dust dust--4"></span><span class="dust dust--5"></span><span class="dust dust--6"></span>
+        <span class="dust dust--7"></span><span class="dust dust--8"></span>
+      </div>
+      <div class="excavation__side">
+        <ol class="dig-log" id="digLog" role="status" aria-live="polite"></ol>
+        <button type="button" class="btn btn--ghost btn--small" id="skipDig">跳过动画</button>
+      </div>
+    </section>
+
+    <!-- 展厅 02：鉴定室 -->
+    <div class="results" id="results" hidden>
+      <section class="panel verdict" id="verdict" aria-labelledby="verdictTitle"></section>
+
+      <section class="panel strata-panel" id="strata" aria-labelledby="strataTitle">
+        <div class="panel__head">
+          <span class="plaque">剖面图</span>
+          <h2 class="panel__title" id="strataTitle">地层剖面</h2>
+          <p class="panel__en">Stratigraphy of Bytes</p>
+        </div>
+        <p class="panel__lede">从地表（你看到的乱码）一层层往下挖，直到基岩（原文）。每层上排是误读出的字符、中排是字节、下排是正确解读；悬停、点击或用方向键浏览字符，可看到它们共享的字节。</p>
+        <div class="strata" id="strataBody"></div>
+      </section>
+
+      <section class="panel docent" id="docent" aria-labelledby="docentTitle">
+        <div class="panel__head">
+          <span class="plaque" id="docentExhibit">MBX-2026-····</span>
+          <h2 class="panel__title" id="docentTitle">讲解员解说</h2>
+          <p class="panel__en">Docent's Commentary</p>
+        </div>
+        <div class="docent__bar">
+          <div class="docent__avatar" id="docentAvatar" aria-hidden="true">🧑‍🏫</div>
+          <div class="docent__who">
+            <strong id="docentName">讲解员</strong>
+            <span id="docentStatus">正在候场</span>
+          </div>
+        </div>
+        <fieldset class="style-switch" id="styleSwitch">
+          <legend class="sr-only">讲解风格</legend>
+        </fieldset>
+        <div class="docent__tools">
+          <button type="button" class="btn btn--ghost btn--small" id="newDocent">换一位讲解员</button>
+          <label class="toggle" id="aiToggleWrap" hidden>
+            <input type="checkbox" id="aiToggle" role="switch">
+            <span class="toggle__track" aria-hidden="true"></span>
+            <span>AI 讲解员</span>
+          </label>
+          <button type="button" class="btn btn--ghost btn--small" id="skipType" hidden>跳过打字</button>
+          <button type="button" class="btn btn--ghost btn--small" id="stopAi" hidden>停止 AI</button>
+        </div>
+        <p class="notice" id="aiNotice" role="status" hidden></p>
+        <article class="narration" id="narration" aria-live="polite" aria-busy="false"></article>
+        <button type="button" class="btn btn--ghost btn--small narr-more" id="narrMore" hidden aria-controls="narration" aria-expanded="false">展开全文</button>
+        <div class="docent__footer">
+          <button type="button" class="btn btn--ghost btn--small" id="speakBtn" aria-pressed="false">🔊 语音导览</button>
+          <button type="button" class="btn btn--ghost btn--small" id="copyNarration">复制讲解</button>
+          <button type="button" class="btn btn--ghost btn--small" id="copyReport">复制鉴定报告（Markdown）</button>
+        </div>
+      </section>
+
+      <div class="results__extra">
+        <section class="panel alts" id="alternatives" aria-labelledby="altsTitle">
+          <div class="panel__head">
+            <h2 class="panel__title panel__title--sm" id="altsTitle">其他考古学家的看法</h2>
+            <p class="panel__en">Second Opinions</p>
+          </div>
+          <ol class="alts__list" id="altsList"></ol>
+        </section>
+
+        <section class="panel signatures" id="signatures" aria-labelledby="sigTitle" hidden>
+          <div class="panel__head">
+            <h2 class="panel__title panel__title--sm" id="sigTitle">名器签名</h2>
+            <p class="panel__en">Famous Relics Identified</p>
+          </div>
+          <ul class="sig__list" id="sigList"></ul>
+        </section>
+      </div>
+    </div>
+
+    <!-- 展厅 03 / 04：赝品工坊 与 我的展柜 -->
+    <div class="workshop">
+      <section class="hall panel forge" id="forge" aria-labelledby="forgeTitle">
+        <div class="hall__head">
+          <span class="hall__no">展厅 03</span>
+          <h2 class="hall__title" id="forgeTitle">赝品工坊</h2>
+          <p class="hall__en">The Forgery Workshop</p>
+        </div>
+        <p class="panel__lede">亲手"做旧"一段文字：先选一个经典配方，或自己指定每一层"原编码 → 误读为"。做好的赝品可以直接送去鉴定，看看考古学家能不能识破。</p>
+        <form class="forge-form" id="forgeForm" novalidate>
+          <label class="param param--wide">
+            <span>经典配方</span>
+            <select id="forgePreset"></select>
+          </label>
+          <p class="forge-story" id="forgeStory"></p>
+          <label class="field-label" for="forgeText">原文</label>
+          <textarea id="forgeText" rows="3" spellcheck="false"></textarea>
+          <fieldset class="forge-layers">
+            <legend>做旧工序（从最早的一层开始）</legend>
+            <ol id="forgeLayers" class="forge-layers__list"></ol>
+            <button type="button" class="btn btn--ghost btn--small" id="forgeAddLayer">＋ 再加一层</button>
+          </fieldset>
+          <div class="forge-opts">
+            <label class="check"><input type="checkbox" id="forgeDrop"> <span>模拟复制粘贴时丢失不可见字节</span></label>
+            <label class="check"><input type="checkbox" id="forgeNbsp"> <span>NBSP（不换行空格）变成普通空格</span></label>
+          </div>
+          <div class="dig-actions">
+            <button type="submit" class="btn btn--primary">制作赝品</button>
+          </div>
+          <p class="notice notice--error" id="forgeError" role="alert" hidden></p>
+          <div class="forge-output" id="forgeOutputWrap" hidden>
+            <label class="field-label" for="forgeOutput">出炉的赝品</label>
+            <textarea id="forgeOutput" rows="3" readonly spellcheck="false"></textarea>
+            <ol class="forge-trace" id="forgeTrace"></ol>
+            <div class="dig-actions">
+              <button type="button" class="btn btn--ghost btn--small" id="forgeCopy">复制赝品</button>
+              <button type="button" class="btn btn--primary btn--small" id="forgeSend">送去鉴定</button>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <section class="hall panel cabinet" id="cabinet" aria-labelledby="cabinetTitle">
+        <div class="hall__head">
+          <span class="hall__no">展厅 04</span>
+          <h2 class="hall__title" id="cabinetTitle">我的展柜</h2>
+          <p class="hall__en">My Cabinet of Curiosities</p>
+        </div>
+        <p class="panel__lede">最近 20 次鉴定只保存在这台设备的浏览器里，点一下即可重新打开。</p>
+        <ol class="cabinet__list" id="historyList"></ol>
+        <p class="cabinet__empty" id="historyEmpty">展柜还空着。去出土区挖点什么吧。</p>
+        <button type="button" class="btn btn--ghost btn--small" id="historyClear" hidden>清空展柜</button>
+      </section>
+    </div>
+  </main>
+
+  <footer class="colophon">
+    <div class="brass-rule" aria-hidden="true"></div>
+    <div class="wrap colophon__inner">
+      <p>乱码考古学家 · 所有鉴定均在你的浏览器本地完成，输入不会上传；只有开启 AI 讲解员时，分析摘要才会直接发送到你设置的端点。</p>
+      <p class="colophon__en">Mojibake Archaeologist — a night at the Museum of Encodings.</p>
+    </div>
+  </footer>
+
+  <!-- 馆务设置抽屉 -->
+  <dialog class="drawer" id="settingsDialog" aria-labelledby="settingsTitle">
+    <form class="drawer__form" id="settingsForm" novalidate>
+      <div class="drawer__head">
+        <h2 class="panel__title" id="settingsTitle">馆务设置</h2>
+        <button type="button" class="icon-btn" id="closeSettings" aria-label="关闭设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+        </button>
+      </div>
+
+      <div class="drawer__body">
+        <fieldset class="drawer__group">
+          <legend>AI 讲解员（可选）</legend>
+          <label class="param param--wide">
+            <span>提供方</span>
+            <select id="setProvider"></select>
+          </label>
+          <div class="llm-fields" id="llmFields">
+            <label class="param param--wide" for="setKey">
+              <span>API 密钥</span>
+            </label>
+            <div class="key-row">
+              <input type="password" id="setKey" autocomplete="off" spellcheck="false" aria-describedby="keyNote">
+              <button type="button" class="btn btn--ghost btn--small" id="toggleKey" aria-pressed="false">显示</button>
+            </div>
+            <label class="check"><input type="checkbox" id="setRemember"> <span>记住密钥（存入本机 localStorage；不勾选则只保留到关闭标签页）</span></label>
+            <p class="security-note" id="keyNote">🔒 密钥只保存在你这台设备的浏览器里，并由浏览器<strong>直接</strong>发送到你填写的端点；本页面没有任何后端服务器，也绝不会把密钥放进网址。</p>
+            <label class="param param--wide">
+              <span>Base URL</span>
+              <input type="url" id="setBaseUrl" spellcheck="false" autocomplete="off" inputmode="url">
+            </label>
+            <label class="param param--wide">
+              <span>模型</span>
+              <input type="text" id="setModel" list="modelList" spellcheck="false" autocomplete="off">
+              <datalist id="modelList"></datalist>
+            </label>
+            <label class="param param--wide">
+              <span>思考力度（effort）</span>
+              <select id="setEffort" aria-describedby="effortHint">
+                <option value="low">low · 快</option>
+                <option value="medium" selected>medium · 均衡</option>
+                <option value="high">high · 深思</option>
+              </select>
+              <small class="param__hint" id="effortHint" hidden>仅 Anthropic Claude 支持；当前提供方会忽略这项设置。</small>
+            </label>
+            <div class="test-row">
+              <button type="button" class="btn btn--ghost btn--small" id="testConn">测试连接</button>
+              <span class="test-result" id="testResult" role="status" aria-live="polite"></span>
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset class="drawer__group">
+          <legend>讲解与展厅</legend>
+          <label class="param param--wide">
+            <span>默认讲解风格</span>
+            <select id="setStyle"></select>
+          </label>
+          <label class="check"><input type="checkbox" id="setAnimation"> <span>发掘动画与打字机效果</span></label>
+          <label class="check"><input type="checkbox" id="setVoice"> <span>显示"语音导览"按钮</span></label>
+          <div class="theme-pick" role="radiogroup" aria-labelledby="themePickLabel">
+            <span id="themePickLabel" class="theme-pick__label">主题</span>
+            <label class="chip-radio"><input type="radio" name="setTheme" value="auto"> <span>跟随系统</span></label>
+            <label class="chip-radio"><input type="radio" name="setTheme" value="light"> <span>白昼展厅</span></label>
+            <label class="chip-radio"><input type="radio" name="setTheme" value="dark"> <span>夜间展厅</span></label>
+          </div>
+        </fieldset>
+      </div>
+
+      <div class="drawer__foot">
+        <button type="button" class="btn btn--ghost btn--small" id="clearKey">清除 AI 设置与密钥</button>
+        <button type="submit" class="btn btn--primary">保存设置</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <div class="sr-only" id="srAnnounce" aria-live="polite"></div>
+
+  <script src="src/lexicon.js"></script>
+  <script src="src/codecs.js"></script>
+  <script src="src/scorer.js"></script>
+  <script src="src/forge.js"></script>
+  <script src="src/engine.js"></script>
+  <script src="src/narrator.js"></script>
+  <script src="src/llm.js"></script>
+  <script src="src/app.js"></script>
+</body>
+</html>
