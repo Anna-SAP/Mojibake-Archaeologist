@@ -26,35 +26,64 @@
   const FFFD = '\uFFFD';
   const TD = typeof TextDecoder === 'function' ? TextDecoder : null;
 
+  /**
+   * UI language for user-visible text (docs §11.2), by the one rule every module shares:
+   * MBX.I18n.resolve(arg), where arg is a locale string or an options object with `locale`. A
+   * supported tag wins ('en', ' en_US ', 'zh-TW'...); anything else follows the current UI
+   * language. Without src/i18n.js the same tag rule applies and everything else is zh-CN. Read at
+   * call time so a language switch applies to the next call.
+   */
+  function localeOf(arg) {
+    const I18n = MBX.I18n;
+    if (I18n && typeof I18n.resolve === 'function') {
+      try {
+        return I18n.resolve(arg) === 'en-US' ? 'en-US' : 'zh-CN';
+      } catch (_) { /* fall through */ }
+    }
+    // Without I18n.resolve: the I18n.normalize tag rule, then the current language, then zh-CN.
+    const tag = typeof arg === 'string' ? arg : arg && typeof arg === 'object' ? arg.locale : null;
+    const s = typeof tag === 'string' ? tag.trim() : '';
+    if (/^en(?:[-_]|$)/i.test(s)) return 'en-US';
+    if (/^zh(?:[-_]|$)/i.test(s)) return 'zh-CN';
+    if (I18n && typeof I18n.getLocale === 'function') {
+      try {
+        return /^en(?:[-_]|$)/i.test(String(I18n.getLocale()).trim()) ? 'en-US' : 'zh-CN';
+      } catch (_) { /* fall through */ }
+    }
+    return 'zh-CN';
+  }
+  const isEn = (arg) => localeOf(arg) === 'en-US';
+
   // ---------------------------------------------------------------------------
   // Registry (order = search priority, see docs/ARCHITECTURE.md §2)
   // ---------------------------------------------------------------------------
 
-  // [id, name, zh, type, region, whatwg label | null, year of birth]
+  // [id, name, zh, en, type, region, whatwg label | null, year of birth]
+  // zh / en: the short description shown next to the name (Codecs.describe picks one by locale).
   // Years are first standardisation or first shipping use, to the year (some are approximate:
   // Shift_JIS ~1982, EUC-JP ~1985, CP866 ~1987, Windows-125x with Windows 3.x ~1990–1993).
   const SPECS = [
-    ['utf-8', 'UTF-8', '万国码 UTF-8', 'utf8', 'universal', 'utf-8', 1992],
-    ['gbk', 'GBK / GB18030', '简体中文（代码页 936）', 'double', 'zh-Hans', 'gbk', 1995],
-    ['big5', 'Big5', '繁体中文（代码页 950）', 'double', 'zh-Hant', 'big5', 1984],
-    ['shift_jis', 'Shift_JIS', '日文（代码页 932）', 'double', 'ja', 'shift_jis', 1982],
-    ['euc-jp', 'EUC-JP', '日文 Unix', 'double', 'ja', 'euc-jp', 1985],
-    ['euc-kr', 'EUC-KR', '韩文（代码页 949）', 'double', 'ko', 'euc-kr', 1987],
-    ['windows-1252', 'Windows-1252', '西欧（常被误称 Latin-1）', 'single', 'west', 'windows-1252', 1985],
-    ['iso-8859-1', 'ISO-8859-1', '真·Latin-1（字节=码位）', 'single', 'west', null, 1987],
-    ['windows-1251', 'Windows-1251', '西里尔/俄文', 'single', 'cyrillic', 'windows-1251', 1990],
-    ['koi8-r', 'KOI8-R', '俄文 Unix/邮件', 'single', 'cyrillic', 'koi8-r', 1993],
-    ['macintosh', 'Mac OS Roman', '经典 Mac 西欧', 'single', 'west', 'macintosh', 1984],
-    ['cp437', 'CP437', 'IBM PC / DOS 美国；ZIP 文件名默认编码', 'single', 'dos', null, 1981],
-    ['ibm866', 'CP866', 'DOS 西里尔', 'single', 'cyrillic', 'ibm866', 1987],
-    ['windows-1250', 'Windows-1250', '中欧', 'single', 'central-eu', 'windows-1250', 1992],
-    ['windows-1253', 'Windows-1253', '希腊文', 'single', 'greek', 'windows-1253', 1992],
-    ['windows-1254', 'Windows-1254', '土耳其文', 'single', 'turkish', 'windows-1254', 1992],
-    ['windows-1255', 'Windows-1255', '希伯来文', 'single', 'hebrew', 'windows-1255', 1992],
-    ['windows-1256', 'Windows-1256', '阿拉伯文', 'single', 'arabic', 'windows-1256', 1993],
-    ['windows-874', 'Windows-874', '泰文', 'single', 'thai', 'windows-874', 1993],
-    ['utf-16le', 'UTF-16LE', 'Windows 所称的 "Unicode"', 'utf16', 'universal', 'utf-16le', 1996],
-    ['utf-16be', 'UTF-16BE', '大端 UTF-16', 'utf16', 'universal', 'utf-16be', 1996],
+    ['utf-8', 'UTF-8', '万国码 UTF-8', 'Universal Unicode (UTF-8)', 'utf8', 'universal', 'utf-8', 1992],
+    ['gbk', 'GBK / GB18030', '简体中文（代码页 936）', 'Simplified Chinese (GBK / GB18030)', 'double', 'zh-Hans', 'gbk', 1995],
+    ['big5', 'Big5', '繁体中文（代码页 950）', 'Traditional Chinese (Big5, code page 950)', 'double', 'zh-Hant', 'big5', 1984],
+    ['shift_jis', 'Shift_JIS', '日文（代码页 932）', 'Japanese (Shift_JIS)', 'double', 'ja', 'shift_jis', 1982],
+    ['euc-jp', 'EUC-JP', '日文 Unix', 'Japanese Unix (EUC-JP)', 'double', 'ja', 'euc-jp', 1985],
+    ['euc-kr', 'EUC-KR', '韩文（代码页 949）', 'Korean (EUC-KR, code page 949)', 'double', 'ko', 'euc-kr', 1987],
+    ['windows-1252', 'Windows-1252', '西欧（常被误称 Latin-1）', 'Western European (Windows-1252)', 'single', 'west', 'windows-1252', 1985],
+    ['iso-8859-1', 'ISO-8859-1', '真·Latin-1（字节=码位）', 'True Latin-1 (bytes = code points)', 'single', 'west', null, 1987],
+    ['windows-1251', 'Windows-1251', '西里尔/俄文', 'Cyrillic / Russian (Windows-1251)', 'single', 'cyrillic', 'windows-1251', 1990],
+    ['koi8-r', 'KOI8-R', '俄文 Unix/邮件', 'Russian Unix / email (KOI8-R)', 'single', 'cyrillic', 'koi8-r', 1993],
+    ['macintosh', 'Mac OS Roman', '经典 Mac 西欧', 'Classic Mac Western European (Mac OS Roman)', 'single', 'west', 'macintosh', 1984],
+    ['cp437', 'CP437', 'IBM PC / DOS 美国；ZIP 文件名默认编码', 'IBM PC / DOS (US), the default for ZIP file names', 'single', 'dos', null, 1981],
+    ['ibm866', 'CP866', 'DOS 西里尔', 'DOS Cyrillic (CP866)', 'single', 'cyrillic', 'ibm866', 1987],
+    ['windows-1250', 'Windows-1250', '中欧', 'Central European (Windows-1250)', 'single', 'central-eu', 'windows-1250', 1992],
+    ['windows-1253', 'Windows-1253', '希腊文', 'Greek (Windows-1253)', 'single', 'greek', 'windows-1253', 1992],
+    ['windows-1254', 'Windows-1254', '土耳其文', 'Turkish (Windows-1254)', 'single', 'turkish', 'windows-1254', 1992],
+    ['windows-1255', 'Windows-1255', '希伯来文', 'Hebrew (Windows-1255)', 'single', 'hebrew', 'windows-1255', 1992],
+    ['windows-1256', 'Windows-1256', '阿拉伯文', 'Arabic (Windows-1256)', 'single', 'arabic', 'windows-1256', 1993],
+    ['windows-874', 'Windows-874', '泰文', 'Thai (Windows-874)', 'single', 'thai', 'windows-874', 1993],
+    ['utf-16le', 'UTF-16LE', 'Windows 所称的 "Unicode"', 'Windows "Unicode" (UTF-16LE)', 'utf16', 'universal', 'utf-16le', 1996],
+    ['utf-16be', 'UTF-16BE', '大端 UTF-16', 'Big-endian UTF-16 (UTF-16BE)', 'utf16', 'universal', 'utf-16be', 1996],
   ];
 
   // CP437 0x80–0xFF, verbatim from docs/ARCHITECTURE.md §2.1 (0xFF is NO-BREAK SPACE).
@@ -647,18 +676,21 @@
     return res;
   }
 
-  const ENCODINGS = SPECS.map(([id, name, zh, type, region, whatwg, since]) => {
+  const ENCODINGS = SPECS.map(([id, name, zh, en, type, region, whatwg, since]) => {
     const own = whatwg === null || type === 'utf8' || type === 'utf16';
     const available = whatwg === null ? true : own || makeDecoder(whatwg) !== null;
     const invisible = Object.freeze(available ? deriveInvisible(id, type, whatwg) : []);
-    return Object.freeze({ id, name, zh, type, region, whatwg, since, invisible, available });
+    return Object.freeze({ id, name, zh, en, type, region, whatwg, since, invisible, available });
   });
   const BY_ID = new Map(ENCODINGS.map((e) => [e.id, e]));
 
   const codecCache = new Map();
 
   function buildCodec(info) {
-    if (!info.available) throw new Error(`当前环境的 TextDecoder 不支持 ${info.name} 编码`);
+    if (!info.available) {
+      throw new Error(isEn(null) ? `This environment's TextDecoder does not support the ${info.name} encoding`
+        : `当前环境的 TextDecoder 不支持 ${info.name} 编码`);
+    }
     if (info.type === 'utf8') return utf8Codec;
     if (info.type === 'utf16') return makeUtf16Codec(info.id === 'utf-16le');
     if (info.type === 'single') return makeSingleByteCodec(info);
@@ -669,7 +701,7 @@
     let c = codecCache.get(id);
     if (c) return c;
     const info = BY_ID.get(String(id).toLowerCase());
-    if (!info) throw new Error(`未知编码：${id}`);
+    if (!info) throw new Error(isEn(null) ? `Unknown encoding: ${id}` : `未知编码：${id}`);
     c = codecCache.get(info.id) || buildCodec(info);
     codecCache.set(info.id, c);
     codecCache.set(id, c);
@@ -1063,6 +1095,12 @@
     },
     ids() {
       return ENCODINGS.filter((e) => e.available).map((e) => e.id);
+    },
+    /** Localized short description of an encoding (EncodingInfo.zh / .en); undefined if unknown. */
+    describe(id, locale) {
+      const info = id == null ? undefined : BY_ID.get(String(id).toLowerCase());
+      if (!info) return undefined;
+      return isEn(locale) ? info.en : info.zh;
     },
     canEncodeChar,
     encodeChar,

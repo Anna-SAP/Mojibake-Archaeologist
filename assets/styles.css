@@ -748,12 +748,13 @@ select:focus-visible {
   padding-top: clamp(18px, 3vw, 34px);
 }
 
+/* The language switch sits top-left, before the seal; on phones it shares a top bar with the tools. */
 .masthead__inner {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   grid-template-areas:
-    "brand tools"
-    "slogan slogan";
+    "lang brand tools"
+    "slogan slogan slogan";
   align-items: center;
   gap: 0.8rem 1rem;
   padding-bottom: clamp(14px, 2.4vw, 26px);
@@ -845,6 +846,57 @@ select:focus-visible {
   align-items: center;
 }
 
+/* EN / ZH: two toggle buttons; the active language is engraved in brass, the other one muted. */
+.lang-switch {
+  grid-area: lang;
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.05rem;
+  min-height: 2.6rem;
+  padding: 0.2rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  font-family: var(--font-serif);
+  line-height: 1;
+}
+
+.lang-switch__btn {
+  min-width: 2.3rem;
+  min-height: 2.1rem;
+  padding: 0 0.42rem 0 calc(0.42rem + 0.1em); /* re-centres the letter-spaced label */
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  transition: color 0.18s, background-color 0.18s, border-color 0.18s;
+}
+
+.lang-switch__btn:hover {
+  color: var(--verdigris);
+}
+
+.lang-switch__btn[aria-pressed="true"] {
+  color: var(--brass);
+  font-weight: 900;
+  background: var(--brass-glow);
+  border-color: var(--brass-line);
+  cursor: default;
+}
+
+.lang-switch__sep {
+  color: var(--ink-3);
+  opacity: 0.6;
+  font-size: 0.85rem;
+  user-select: none;
+}
+
 .module-notice {
   margin-top: 1rem;
   padding: 0.8em 1em;
@@ -857,8 +909,8 @@ select:focus-visible {
 
 @media (min-width: 900px) {
   .masthead__inner {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-areas: "brand slogan tools";
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    grid-template-areas: "lang brand slogan tools";
   }
 
   .brand__slogan {
@@ -872,7 +924,16 @@ select:focus-visible {
     display: none;
   }
 
-  /* Keep the museum name on one line beside the two tool buttons on phones. */
+  .masthead__inner {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "lang tools"
+      "brand brand"
+      "slogan slogan";
+    row-gap: 0.7rem;
+  }
+
+  /* Keep the museum name on one line on phones. */
   .brand {
     gap: 10px;
   }
@@ -911,6 +972,81 @@ select:focus-visible {
 
   .icon-btn--label {
     padding-inline: 0.4em;
+  }
+}
+
+/* ---------- 4b. Interface language (zh-CN / en-US) ---------- */
+
+/* Set by the <head> script for a non-Chinese visitor until src/app.js has translated the page. */
+html[data-i18n-pending] body {
+  visibility: hidden;
+}
+
+/* The museum's name in the other language: English under the Chinese title and vice versa. */
+.brand__alt--zh {
+  display: none;
+}
+
+html[lang|="en"] .brand__alt--en {
+  display: none;
+}
+
+html[lang|="en"] .brand__alt--zh {
+  display: inline;
+  letter-spacing: 0.32em;
+}
+
+/* In English the plaques already carry the English names; the small-caps lines would repeat them. */
+html[lang|="en"] .hall__en,
+html[lang|="en"] .panel__en,
+html[lang|="en"] .sub-en {
+  display: none;
+}
+
+html[lang|="en"] .brand__title {
+  font-size: clamp(1.6rem, 3.3vw, 2.45rem);
+  letter-spacing: 0.01em;
+}
+
+html[lang|="en"] .brand__kicker {
+  letter-spacing: 0.14em;
+}
+
+/* Byte-grid row labels: English words ("Restored") need a wider column than 3.2rem, not smaller
+   type. --cell is computed from --label, so the cells shrink to make room (src/app.js estimates
+   the same width when it decides how many bytes fit on a row). */
+html[lang|="en"] .bytegrid {
+  --label: 3.9rem;
+}
+
+html[lang|="en"] .bytegrid__label {
+  letter-spacing: 0;
+}
+
+/* The English museum name is wider than the Chinese one: between 900px and 1280px the slogan
+   would be squeezed into a sliver next to it, so it takes its own row under the brand. */
+@media (min-width: 900px) and (max-width: 1279px) {
+  html[lang|="en"] .masthead__inner {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "lang brand tools"
+      "slogan slogan slogan";
+  }
+
+  html[lang|="en"] .brand__slogan {
+    justify-self: start;
+    max-width: none;
+  }
+}
+
+@media (max-width: 560px) {
+  html[lang|="en"] .brand__title {
+    font-size: 1.55rem;
+    white-space: normal;
+  }
+
+  html[lang|="en"] .brand__kicker {
+    letter-spacing: 0.06em;
   }
 }
 
@@ -2977,6 +3113,7 @@ select:focus-visible {
 @media print {
   body::before,
   .masthead__tools,
+  .lang-switch,
   .dig-grid,
   .excavation,
   .workshop,

@@ -46,7 +46,7 @@ const assert = {
 // Loads every src module into globalThis.MBX in browser order; safe to call repeatedly.
 function loadAll() {
   const path = require('path');
-  const order = ['lexicon', 'codecs', 'scorer', 'forge', 'engine', 'narrator', 'llm'];
+  const order = ['i18n', 'lexicon', 'codecs', 'scorer', 'forge', 'engine', 'narrator', 'narrator-en', 'llm'];
   for (const name of order) {
     const file = path.join(__dirname, '..', 'src', `${name}.js`);
     try {

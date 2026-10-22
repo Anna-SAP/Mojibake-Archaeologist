@@ -25,8 +25,8 @@
 ```
 
 - 模块之间只通过 `MBX.*` 访问，**在调用时**（而非加载时）读取依赖，避免加载顺序陷阱；但 `index.html` 仍按下列顺序加载：
-  `lexicon.js → codecs.js → scorer.js → forge.js → engine.js → narrator.js → llm.js → app.js`
-- 语言：UI 文案与讲解文本为**简体中文**；代码标识符与注释为英文；注释密度适中（解释"为什么"）。
+  `i18n.js → lexicon.js → codecs.js → scorer.js → forge.js → engine.js → narrator.js → narrator-en.js → llm.js → app.js`（〔增补〕i18n.js 与 narrator-en.js 见 §11）
+- 语言：UI 文案与讲解文本默认为**简体中文**（〔增补〕可切换为美国英语 en-US，见 §11）；代码标识符与注释为英文；注释密度适中（解释"为什么"）。
 - 代码风格：ES2020，2 空格缩进，单引号，分号，`const/let`，无 TypeScript。
 - 浏览器目标：近两年的 Chrome / Edge / Firefox / Safari。`TextDecoder` 支持 WHATWG 全部遗留编码。
 - 唯一的外部网络资源是 Google Fonts 字体样式表（可缺省，离线时回落系统字体）；除此之外只有用户启用 AI 讲解员后发往其所填端点的请求。
@@ -36,12 +36,14 @@
 ```
 index.html                 单页入口（按顺序引入 src/*.js 与 assets/styles.css）
 assets/styles.css          全部样式（含明暗主题）
+src/i18n.js                〔增补〕MBX.I18n —— 界面语言（zh-CN / en-US）：当前语言、检测、切换事件、UI 词典与 t()（见 §11）
 src/lexicon.js             MBX.Lexicon  —— 字频/字表数据与分层（运行时由 TextDecoder 推导常用字层级）
 src/codecs.js              MBX.Codecs   —— 编码注册表、逐字节编解码、字节对齐分段、带缺口 UTF-8 修复解码
 src/scorer.js              MBX.Scorer   —— 文本"可读性/可信度"评分、语言检测、乱码特征检测
 src/forge.js               MBX.Forge    —— 乱码伪造器（赝品工坊 + 测试语料生成 + 馆藏精选）
 src/engine.js              MBX.Engine   —— 还原搜索引擎（束搜索多层误解码链、转义层、残缺修复、特征签名）
 src/narrator.js            MBX.Narrator —— 内置动态模板讲解员 + 编码史实知识库
+src/narrator-en.js         〔增补〕en-US 讲解员语言包（英文模板、讲解员人设、史实文案），向 MBX.Narrator 注册（见 §11）
 src/llm.js                 MBX.LLM      —— 可选 LLM 讲解（Anthropic Claude 默认 / OpenAI 兼容端点 / 自定义 provider 钩子）
 src/app.js                 MBX.App + UI 控制器（纯函数工具在前，DOM 绑定、动画、渲染在后）
 tools/serve.js             〔增补〕零依赖静态服务器：node tools/serve.js [port]（供禁止 file:// 脚本的浏览器/工具预览）
@@ -526,13 +528,13 @@ OpenAI 兼容端点：`POST {baseUrl}/chat/completions`，`Authorization: Bearer
    原样保留（kept）的零宽片段合并为一个虚线中性格；网格按字符边界分行（每行 16 字节，窄屏 8 字节）；默认显示前 48 字节，可展开（最多 4096 字节）。
 6. **讲解员解说**：头像 + 风格切换（幽默/学术/毒舌）+ "换一位讲解员"；模板讲解打字机效果（可跳过）；若 LLM 已配置，显示"AI 讲解员"开关与流式输出，失败自动回退模板并提示原因
    （网络/CORS/鉴权/配置类失败后不再自动重试，直到保存设置或重新打开开关）；过长的讲解可折叠（"展开全文"）；
-   "🔊 语音导览"（speechSynthesis，zh-CN）；复制讲解/复制鉴定报告（Markdown，讲解内容经 defangMarkdown 处理）。
+   "🔊 语音导览"（speechSynthesis，按界面语言选 zh-CN / en-US 语音）；复制讲解/复制鉴定报告（Markdown，讲解内容经 defangMarkdown 处理）。
 7. **其他考古学家的看法**：alternatives 列表（输出、链路、置信度），可点击切换为主结论；低可信度猜测收进折叠区。
 8. **名器签名**：命中锟斤拷/烫烫烫等时的特别展签。
 9. **赝品工坊**：输入正常文本，选择预设或 1–3 层（原编码 → 误读为），可选"丢失不可见字节/NBSP 变空格"，生成乱码，一键"送去鉴定"。
 10. **我的展柜**：最近 20 条鉴定历史（localStorage `mbx.history`，try/catch 包裹），点击可重新打开；可清空。
 11. **设置抽屉**：LLM 提供方（不使用/Anthropic Claude/OpenAI 兼容）、API Key（密码框，"记住"复选框，安全提示：密钥仅保存在本机浏览器并直接发往所填端点）、
-    Base URL、模型、effort（仅 Anthropic 生效）、"测试连接"；讲解风格；动画开关；语音开关；主题。"清除 AI 设置与密钥"只重置 AI 相关字段。
+    Base URL、模型、effort（仅 Anthropic 生效）、"测试连接"；讲解风格；动画开关；语音开关；主题；〔增补〕界面语言（与页眉切换器相同，见 §11）。"清除 AI 设置与密钥"只重置 AI 相关字段。
     偏好存 localStorage `mbx.prefs`。
 12. URL hash 分享：`#q=<encodeURIComponent(input)>` 载入即自动发掘（超过 20000 字时只填入输入框，等待手动发掘）；"复制分享链接"；
     输入超过 2000 字时不写入地址栏 hash。
@@ -555,3 +557,135 @@ MBX.App = {
 ```
 
 `util` 的完整列表以 `src/app.js` 中的 `App.util` 为准；这些工具供测试与调试使用，UI 之外的模块不依赖它们。
+
+## 11. 界面语言 i18n（zh-CN / en-US）〔增补〕
+
+目标：首页可在 **简体中文 `zh-CN`** 与 **美国英语 `en-US`** 之间切换，切换后**整个体验**换语言：界面文案、馆藏精选与赝品配方、
+引擎链路标签/名器签名/乱码特征说明/语言名、内置讲解员的完整讲解、AI 讲解员的提示词与错误提示、Markdown 报告、语音导览的语音。
+用户的**数据**（输入的乱码、还原出的原文、字节网格里的字符）永远原样显示，不翻译。
+
+### 11.1 `MBX.I18n`（src/i18n.js，最先加载）
+
+```js
+I18n.LOCALES          // 冻结数组：[{ id: 'zh-CN', name: '简体中文', short: 'ZH', htmlLang: 'zh-CN', speech: 'zh-CN' },
+                      //            { id: 'en-US', name: 'English (US)', short: 'EN', htmlLang: 'en-US', speech: 'en-US' }]
+I18n.DEFAULT_LOCALE   // 'zh-CN'
+I18n.normalize(tag)   // 只接受字符串：去首尾空白，'_' 视同 '-'；/^zh(-|$)/i -> 'zh-CN'（zh、zh-Hans、zh-CN、zh-SG、zh-TW、zh_HK…），
+                      // /^en(-|$)/i -> 'en-US'（en、en-GB、EN-us、en_US…）；其它（'english'、'eng'、'fr'、''、非字符串）-> null
+I18n.detect()         // 优先级：URL 查询参数 ?lang=… > localStorage 'mbx.prefs' 的 lang 字段 > navigator.languages > 'zh-CN'。
+                      // navigator 只在页面里（存在 document）才参考：取第一个可识别项；浏览器列出了语言、但其中既没有中文也没有英文时取 'en-US'；
+                      // 语言列表为空时不算。Node（包括自带全局 navigator 的 Node 21.2+）永远不读 navigator，所以测试里默认是 'zh-CN'。
+                      // 所有 storage / navigator / location 访问都 try/catch。i18n.js 加载时调用一次，作为初始语言。
+I18n.getLocale()      // 当前语言 id
+I18n.setLocale(id)    // normalize 后设置，返回设置后的当前语言；不可识别的 id 被忽略。语言变化时同步调用 onChange 监听者
+                      // （某个监听者抛错只记日志，不影响其它监听者），并在有 window 时派发 CustomEvent('mbx:localechange', { detail: { locale } })
+I18n.onChange(fn)     // 订阅；返回取消订阅函数
+I18n.t(key, params?, locale?)   // UI 词典查找；'{name}' 占位符一次性插值（参数值里的 '{x}' 不会再被展开）；缺失时回退 zh-CN，再回退 key 本身。
+                                // en-US 下绝对值 ≥ 1000 的数字参数按美式千分位输出（'1,030'），zh-CN 保持原样数字
+I18n.has(key, locale?)
+I18n.register(locale, dict)     // 合并词典条目（扁平 key，如 'dig.title'；只收字符串值）；locale 不可识别时返回 false
+I18n.pick(record, locale?)      // 内容记录取值：record[locale] ?? record['zh-CN'] ?? record
+I18n.resolve(opts?)             // 模块内部统一取语言：opts 可以是语言字符串或 { locale }；可识别的标签 -> 该语言，
+                                // 其余（缺省、null、'fr'、'english'、123…）-> 当前语言 getLocale()；永远返回 'zh-CN' 或 'en-US'
+```
+
+i18n.js 只负责**界面外壳**的词典（index.html 与 app.js 的文案）。各模块自己的内容文案（讲解模板、引擎标签、馆藏文字等）留在各自模块里，
+按下面的规则本地化。
+
+〔实现说明〕与最初合同的差异：`detect()` 只在有 document 时参考 navigator，且浏览器语言里既无中文也无英文时默认英文（产品决定；
+index.html `<head>` 的预判脚本同样处理）；最初合同写的是"navigator.languages 中第一个可识别项 > 'zh-CN'"。
+
+### 11.2 语言传递规则（所有模块）
+
+- 每个**返回用户可见文本**的公开函数都接受可选的 `locale`（放在已有的 opts 对象里；没有 opts 的函数加一个可选的最后参数）。
+- 取值规则统一为 `I18n.resolve(opts)`，**在调用时读取**（从不在加载时缓存，切换语言后下一次调用立即生效）。为了能单独加载，
+  每个模块各带一份同样规则的私有助手：codecs / scorer / engine / forge 的 `localeOf(arg)`，narrator / llm 的 `resolveLocale(opts)`，
+  app 的 `currentLocale(locale)`。规则：有 `MBX.I18n.resolve` 时直接用它；否则按 `normalize` 的标签规则
+  （去首尾空白，`/^en([-_]|$)/i` -> en-US，`/^zh([-_]|$)/i` -> zh-CN），标签不可识别时取 `MBX.I18n.getLocale()`（只有 `getLocale` 的桩对象同样适用），
+  `MBX.I18n` 不存在或抛错时一律为 `'zh-CN'`。因此显式传入不支持的标签（如 `'fr'`、`'english'`）时跟随当前界面语言，而不是固定回退 zh-CN。
+- 单独规范化一个标签时同样以 `I18n.normalize` 为准：narrator / llm 的 `tagLocale(tag)`（`Narrator._internals` / `LLM._internals`）先去首尾空白，
+  有 `MBX.I18n.normalize` 时交给它，没有时用上面同一条正则，返回 `'zh-CN'` / `'en-US'` / `null`；`Narrator._internals.normLocale`
+  （`registerLocale` 用）与 `LLM._internals.normalizeLocale` 把 `null` 当作 `'zh-CN'`；app 的 `normLocale` 直接调用 `I18n.normalize`。
+  `tests/i18n-locale-matrix.test.js` 用同一组标签（大小写、`-` / `_`、首尾空白、脚本与地区子标签、`'english'`、`'enx'`、`'fr'`、空串、非字符串）
+  核对 I18n、App、Engine、Scorer、Codecs、Forge、Narrator、LLM 在两种界面语言下以及没有 i18n.js 时的取值完全一致。
+- **默认行为不变**：不传 locale 且当前语言为 zh-CN 时，所有输出必须与引入 i18n 之前**逐字相同**。除现有测试外，
+  `tests/i18n-zh-golden.test.js` 用从 i18n 之前的源码生成的哈希表（70 个输入 × 9 个字段 + 共用表）守护这一点。
+- en-US 输出中，除"数据"外不得出现任何中日韩文字。数据包括：用户输入、还原文本、乱码与原文字符、字节网格字符、
+  讲解中引用的原字符/乱码字符、编码自带的本地名（如 `锟斤拷` 名器本身）、品牌装饰（必须带 `lang="zh-CN"` 属性）。
+- 语言无关的字段（id、字节、分数、Seg、状态码）保持不变；只有文本字段随语言变化。
+
+### 11.3 各模块增补
+
+- **Codecs**：`EncodingInfo.en`（英文说明，如 `'Western European (Windows-1252)'`，与 `zh` 对应）；`Codecs.describe(id, locale?)` 返回本地化说明。`name` 不变。
+- **Scorer**：`detectLang(text, opts?)` 的 `name` 本地化（en-US：`'Simplified Chinese'`、`'Japanese'`…）；`Scorer.langName(code, locale?)`；
+  `mojibakeSignals(text, opts?)` 的 `hint` 本地化。原 `LANG_NAMES` 保持为中文表，另加 `LANG_NAMES_EN`。
+- **Engine**：`analyze(input, { locale })` —— `Hypothesis.label`、`Hypothesis.lang.name`、`Signature.title/note`、`signals[].hint` 用该语言；
+  `AnalysisResult.locale` 记录所用语言。同一输入在两种语言下的搜索结果（输出、链路、分数、置信度）必须完全相同，只有文本不同
+  （搜索本身从不读取语言）。
+- **Forge**：`GALLERY` 每项加 `en: { title, blurb }`，`PRESETS` 每项加 `en: { name, story }`；`Forge.gallery(locale?)`、`Forge.presets(locale?)`
+  返回已本地化的浅拷贝（`title`/`blurb`/`name`/`story` 已替换为该语言）；`corrupt(text, chain, { locale })` 与 `escape(text, scheme, { locale })`
+  的 `error` 本地化。relic/expect/chain/sample 等数据不变。英文馆藏标题用弯引号包住标本（如 `“大家好” · The Western Misreading`）。
+- **Narrator**：`narrate(result, { style, seed, locale })` 与 `factsFor(result, { locale })`；`Narrator.styles(locale?)` 返回本地化的 STYLES（id 不变）；
+  `Narrator.registerLocale(locale, pack)` 注册语言包。en-US 语言包在 **src/narrator-en.js**（在 narrator.js 之后加载），含英文模板（三种风格，
+  每节 ≥ 3 个变体）、英文讲解员人设与名字、ENCODING/PAIR/SIGNATURE 史实的英文文案。Narration 结构不变；en-US 下 exhibitId 不变。
+  语言包缺失时回退 zh-CN（不得抛错）。
+- **LLM**：`narrate(result, { …, locale })`、`buildPrompt(result, narration, facts, style, locale?)`、`testConnection(cfg, locale?)` ——
+  en-US 时系统提示词与任务说明为英文、要求用美式英语作答；引用的字节、乱码与还原原文一律照抄，引用非英文的还原原文后可在括号里附一句
+  简短英文释义（只附在原文后，不替代原文，乱码本身不加释义）。`LLMError.message` 按抛出时的语言本地化；
+  `listProviders(locale?)`、`LLM.efforts(locale?)` 返回本地化名称（`EFFORTS`/`MODEL_LABELS`/`PROVIDERS` 原导出保持中文以兼容）；
+  `efforts('en-US')` 的名称与设置抽屉词典 `settings.effortLow/Medium/High` 一致：`Low · faster, cheaper` / `Medium · balanced` / `High · most thorough`。
+- **App / index.html**：
+  - 页眉**左上角**的语言切换器 `#langSwitch`（`.lang-switch`）：两个按钮 `EN` / `ZH`，带 `data-locale="en-US|zh-CN"`、对应的 `lang` 属性、
+    `title`、`aria-label`（`EN · English (US)` / `ZH · 简体中文`）与表示当前项的 `aria-pressed`；分组 `role="group"`，用 `aria-labelledby`
+    指向一个隐藏的双语名称 `<span id="langSwitchName" hidden><span lang="en">Interface language</span> · <span lang="zh-CN">界面语言</span></span>`
+    （〔实现说明〕最初合同写的是双语 `aria-label`）。键盘可用，移动端可用；没有 i18n.js 时切换器隐藏。
+  - 静态文案用 `data-i18n="key"`（textContent）、`data-i18n-html="key"`（innerHTML，只用于词典里以 `.html` 结尾的可信标记，从不含用户数据）
+    与 `data-i18n-attr="placeholder:key;aria-label:key;title:key"`（属性）标注，切换时整页重新应用；
+    同时更新 `<html lang>`、`document.title`、`<meta name="description">`。
+  - 首屏前在 `<head>` 的内联脚本中按 `I18n.detect()` 同样的规则预判语言并设置 `<html lang>`；预判结果不是 zh-CN 时给 `<html>` 加
+    `data-i18n-pending`，页面在 app.js 译完之前保持隐藏（3 秒兜底），避免先显示中文再闪成英文（FOUC）。
+  - 切换后（`onLocaleChanged`）：停止语音导览；重新应用静态文案；重绘风格切换、馆藏精选、赝品工坊下拉与配方故事、展柜（含相对时间）；
+    设置抽屉打开时就地换语言（未保存的输入保留；已完成的"测试连接"结果换成 `settings.testOkStale` / `settings.testFailStale` 的短句，
+    进行中的测试以新语言结束，都不会重新发请求）。
+  - 当前结果用 `App.util.relabelResult(result, locale)` **改写文本字段**（label、lang.name、签名 title/note、signal hint、locale，
+    借助 `Engine.chainLabel` / `Engine.signatures` / `Scorer.langName` / `Scorer.signalHint`，并先核对每段旧文本确实是引擎会写出的文本），
+    不重新搜索；改写不了时（返回 null）才以同样的发掘参数重新调用 `Engine.analyze`。
+    〔实现说明〕最初合同写的是"以新语言重新调用 `Engine.analyze`"；搜索与语言无关，改写结果与重新分析完全相同（`stats.ms` 除外）。
+    保留"采纳的候选"、风格、种子、展开的地层、钉住的字节、打开的 `<details>` 与"展开全文"的讲解；内置讲解按新语言重新生成（不再打字）。
+  - AI 讲解员：**正在进行**的 AI 讲解中止并按新语言重新开始；**已完成或已停止**的 AI 讲解不会自动重新请求（每次请求都消耗访客的额度），
+    改由馆内讲解员用新语言讲解，并显示提示 `ai.noticeLangSwitch`（打开"AI 讲解员"开关即可让 AI 用新语言重讲）。
+  - 语音导览按 `LOCALES[i].speech` 选 zh-CN / en-US 语音，并按该语言的句读切分朗读段落。
+  - 发掘动画进行中切换语言时，日志行立即换成新语言，发掘结束时结果按屏幕上的语言改写（`finishExcavation`）；发掘面板隐藏时清空日志。
+  - 访客点击切换器时，语言写入 `localStorage 'mbx.prefs'` 的 `lang` 字段，并用 `history.replaceState` 去掉地址栏里的 `?lang=`；
+    `?lang=en-US|zh-CN` 只决定这次打开的语言（优先于已保存的选择，但不写入 prefs）；分享链接**不**带语言
+    （`App.util.stripLangParam` / `buildShareUrl` 会去掉 `?lang=`）。
+  - Markdown 鉴定报告按当前语言生成。
+  - 设置抽屉是模态对话框（打开时页眉不可点），因此抽屉里另有一组同样的 `EN / ZH` 按钮（`.lang-switch--drawer`，名称 `#langSwitchNameDrawer`，
+    立即生效，未保存的设置项保留）；app.js 绑定并同步页面上所有 `.lang-switch` 分组。
+  - 没有 src/i18n.js 时（只加载 app.js 的 Node 测试或缺文件的页面）：界面语言固定为 zh-CN，`tr()` 对 `status.*` 与 `scheme.*` 回退到
+    app.js 自带的 `STATUS_COPY` / `PARTIAL_CLEAN_COPY` / `SCHEME_NAMES` 中文表，其它 key 原样显示 key 本身。
+
+### 11.4 已实现的附加接口（向后兼容，不属于最初合同）
+
+- **I18n**：`localeInfo(locale)`、`keys(locale)`；以 `.one` 结尾的 key 是英文单数形式（`params.count`，没有时 `params.n`，
+  经 `Intl.PluralRules` 判定为 one 时选用；每种语言缓存一个 PluralRules）；以 `.html` 结尾的 key 是可信的内联标记，由 `data-i18n-html` 应用。
+  只在切换语言后出现的词条：`ai.noticeLangSwitch`、`settings.testOkStale`、`settings.testFailStale`。
+- **Scorer**：`LANG_NAMES_EN`、`SIGNAL_HINTS_EN`、`signalHint(type, locale?)`。
+- **Engine**：`SCHEME_NAMES`（中文）/ `SCHEME_NAMES_EN`、`schemeName(scheme, locale?)`、`signatures(locale?)`、`chainLabel(steps, { partial, locale })`；
+  `SIGNATURES[i].en = { title, note }`（`Engine.SIGNATURES` 本身保持中文）。英文链路标签的子句以 `, ` 连接（中文为「，」），
+  如 `UTF-8 misread as Windows-1252 (2 layers)`、`…, 1 gap repaired`。
+- **Narrator**：语言包合并到 zh-CN 之上（缺项回退中文）；narrator-en.js 同时把包放进 `MBX._narratorPacks['en-US']`，narrator.js 加载时会注册已停放的包，
+  因此两者的加载顺序可以颠倒。语言包可选的 `qFor(body) -> [open, close]` 钩子决定引号（en-US 在含 “…” 的引文外改用 ‘…’；zh-CN 包没有该钩子，引号不变）。
+- **LLM**：`modelLabels(locale?)`、`providerPresets(providerId?, locale?)`；provider 的 `run(args)` 多一个 `args.locale`，`test(config, signal, { locale })`。
+- **App**：`App.util` 新增 `currentLocale`、`tr`、`copyFor`、`stripLangParam`、`aiErrorCore`、`fallbackStyles`、`fallbackGallery`、`relabelResult`；
+  内部的 `startNarration(opts)` 接受 `opts.ai === false`（切换语言时不重新请求 AI）。
+- **测试**：
+  - `tests/i18n.test.js`：I18n 的 normalize / detect / setLocale / t / register 等。
+  - `tests/i18n-leak.test.js` 在 en-US 下跑全部馆藏与一组多样输入，收集引擎、讲解、facts、LLM 提示词、报告与界面文案，
+    剔除数据（输入、输出、各层 before/after、Seg 字符、修复候选、签名与特征匹配串）和名器本名后，断言不含中日韩文字（中日韩标点永不豁免）；
+    并断言 zh-CN 仍输出中文。
+  - `tests/i18n-switch.test.js` 在 vm 里用假 DOM 加载 index.html 与全部 src，验证切换流程（改写结果、AI 不重复请求、视图状态保留、发掘中切换）。
+  - `tests/i18n-zh-golden.test.js`：zh-CN 逐字不变的哈希守护；有意修改中文输出后用 `node tests/i18n-zh-golden.test.js --write` 重新生成。
+  - `tests/i18n-locale-matrix.test.js`：所有模块对同一组语言标签的取值一致（见 §11.2），`LLM.efforts('en-US')` 与设置词典一致。
+  - `tests/core-i18n.test.js`（Codecs/Scorer/Engine/Forge，以及 Narrator/LLM 的语言取值规则）、`tests/llm-i18n.test.js`、
+    `tests/narrator-en.test.js`、`tests/narrator-en-review.test.js`。

@@ -11,8 +11,39 @@
   'use strict';
   const MBX = (root.MBX = root.MBX || {});
 
+  /**
+   * UI language for user-visible text (docs §11.2), by the one rule every module shares:
+   * MBX.I18n.resolve(arg), where arg is a locale string or an options object with `locale`. A
+   * supported tag wins ('en', ' en_US ', 'zh-TW'...); anything else follows the current UI
+   * language. Without src/i18n.js the same tag rule applies and everything else is zh-CN. Read at
+   * call time so a language switch applies to the next call.
+   */
+  function localeOf(arg) {
+    const I18n = MBX.I18n;
+    if (I18n && typeof I18n.resolve === 'function') {
+      try {
+        return I18n.resolve(arg) === 'en-US' ? 'en-US' : 'zh-CN';
+      } catch (_) { /* fall through */ }
+    }
+    // Without I18n.resolve: the I18n.normalize tag rule, then the current language, then zh-CN.
+    const tag = typeof arg === 'string' ? arg : arg && typeof arg === 'object' ? arg.locale : null;
+    const s = typeof tag === 'string' ? tag.trim() : '';
+    if (/^en(?:[-_]|$)/i.test(s)) return 'en-US';
+    if (/^zh(?:[-_]|$)/i.test(s)) return 'zh-CN';
+    if (I18n && typeof I18n.getLocale === 'function') {
+      try {
+        return /^en(?:[-_]|$)/i.test(String(I18n.getLocale()).trim()) ? 'en-US' : 'zh-CN';
+      } catch (_) { /* fall through */ }
+    }
+    return 'zh-CN';
+  }
+  const isEn = (arg) => localeOf(arg) === 'en-US';
+
   function codecs() {
-    if (!MBX.Codecs) throw new Error('MBX.Codecs 尚未加载（请先引入 src/codecs.js）');
+    if (!MBX.Codecs) {
+      throw new Error(isEn(null) ? 'MBX.Codecs is not loaded yet (include src/codecs.js first)'
+        : 'MBX.Codecs 尚未加载（请先引入 src/codecs.js）');
+    }
     return MBX.Codecs;
   }
 
@@ -26,36 +57,62 @@
    * opts.stripReplacement remove U+FFFD
    * The options are applied after every layer, because each layer is a separate copy & paste.
    */
+  // Error messages of corrupt() / escape(), per locale. Quoted values are the user's data.
+  const ERRORS = {
+    'zh-CN': {
+      notText: () => '原文必须是一段文字。',
+      noChain: () => '至少需要一层"原编码 → 误读为"。',
+      layer: (k) => `第 ${k} 层`,
+      unknownEncoding: (tag, id) => `${tag}：不认识的原编码「${id}」。`,
+      unknownMisread: (tag, id) => `${tag}：不认识的误读编码「${id}」。`,
+      unsupported: (tag, name) => `${tag}：当前浏览器不支持 ${name} 编码。`,
+      sameEncoding: (tag, name) => `${tag}：原编码和误读编码都是 ${name}，这样不会产生乱码。`,
+      unencodable: (tag, ch, cp, n, name) =>
+        `${tag}：字符「${ch}」（${cp}，第 ${n} 个字符）无法用 ${name} 编码，` + '这种事故在现实中不会以这种方式发生。',
+      escapeUnencodable: (ch, id) => `字符「${ch}」无法用 ${id} 编码。`,
+      escapeScheme: (scheme) => `不支持的转义方式「${scheme}」。`,
+    },
+    'en-US': {
+      notText: () => 'The original must be a piece of text.',
+      noChain: () => 'Add at least one layer of "original encoding → misread as".',
+      layer: (k) => `Layer ${k}`,
+      unknownEncoding: (tag, id) => `${tag}: unknown original encoding "${id}".`,
+      unknownMisread: (tag, id) => `${tag}: unknown misread-as encoding "${id}".`,
+      unsupported: (tag, name) => `${tag}: this browser does not support the ${name} encoding.`,
+      sameEncoding: (tag, name) => `${tag}: the original and misread-as encodings are both ${name}, so no mojibake would come out.`,
+      unencodable: (tag, ch, cp, n, name) =>
+        `${tag}: the character "${ch}" (${cp}, character ${n}) cannot be encoded in ${name}, ` +
+        'so this accident could not happen this way in real life.',
+      escapeUnencodable: (ch, id) => `The character "${ch}" cannot be encoded in ${id}.`,
+      escapeScheme: (scheme) => `Unsupported escape scheme "${scheme}".`,
+    },
+  };
+
   function corrupt(text, chain, opts) {
     const C = codecs();
     const o = opts || {};
+    const M = ERRORS[localeOf(o)];
     const fail = (error, layerIndex) => ({ ok: false, error, layerIndex });
-    if (typeof text !== 'string') return fail('原文必须是一段文字。', 0);
-    if (!Array.isArray(chain) || chain.length === 0) return fail('至少需要一层"原编码 → 误读为"。', 0);
+    if (typeof text !== 'string') return fail(M.notText(), 0);
+    if (!Array.isArray(chain) || chain.length === 0) return fail(M.noChain(), 0);
 
     let current = text;
     const layers = [];
     for (let k = 0; k < chain.length; k++) {
       const layer = chain[k] || {};
-      const tag = `第 ${k + 1} 层`;
+      const tag = M.layer(k + 1);
       const enc = C.get(layer.encoding);
       const wrong = C.get(layer.misreadAs);
-      if (!enc) return fail(`${tag}：不认识的原编码「${layer.encoding}」。`, k);
-      if (!wrong) return fail(`${tag}：不认识的误读编码「${layer.misreadAs}」。`, k);
+      if (!enc) return fail(M.unknownEncoding(tag, layer.encoding), k);
+      if (!wrong) return fail(M.unknownMisread(tag, layer.misreadAs), k);
       if (!enc.available || !wrong.available) {
         const missing = enc.available ? wrong : enc;
-        return fail(`${tag}：当前浏览器不支持 ${missing.name} 编码。`, k);
+        return fail(M.unsupported(tag, missing.name), k);
       }
-      if (enc.id === wrong.id) return fail(`${tag}：原编码和误读编码都是 ${enc.name}，这样不会产生乱码。`, k);
+      if (enc.id === wrong.id) return fail(M.sameEncoding(tag, enc.name), k);
 
       const r = C.encode(enc.id, current);
-      if (!r.ok) {
-        return fail(
-          `${tag}：字符「${r.failChar}」（${uPlus(r.failChar)}，第 ${r.failIndex + 1} 个字符）无法用 ${enc.name} 编码，` +
-            '这种事故在现实中不会以这种方式发生。',
-          k
-        );
-      }
+      if (!r.ok) return fail(M.unencodable(tag, r.failChar, uPlus(r.failChar), r.failIndex + 1, enc.name), k);
       const d = C.decode(wrong.id, r.bytes);
       let output = d.text;
       if (o.dropInvisible && wrong.invisible.length) {
@@ -102,7 +159,7 @@
     }
     const encId = o.encoding || 'utf-8';
     const r = codecs().encode(encId, text);
-    if (!r.ok) return { ok: false, error: `字符「${r.failChar}」无法用 ${encId} 编码。` };
+    if (!r.ok) return { ok: false, error: ERRORS[localeOf(o)].escapeUnencodable(r.failChar, encId) };
     const bytes = Array.from(r.bytes);
     const isUnreserved = (b) => (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a) || b === 0x2d || b === 0x2e || b === 0x5f || b === 0x7e;
     const ascii = (b) => String.fromCharCode(b);
@@ -116,7 +173,7 @@
       case 'hex-dump':
         return { ok: true, output: bytes.map(hex2).join(' ') };
       default:
-        return { ok: false, error: `不支持的转义方式「${scheme}」。` };
+        return { ok: false, error: ERRORS[localeOf(o)].escapeScheme(scheme) };
     }
   }
 
@@ -128,121 +185,217 @@
       id: 'utf8-as-1252', name: 'UTF-8 → Windows-1252（西欧误读）', chain: [L('utf-8', 'windows-1252')], opts: {},
       sample: '大家好',
       story: '最经典的乱码：UTF-8 网页被当成西欧编码打开，每个汉字裂成三块，满屏 "å¤§"。',
+      en: {
+        name: 'UTF-8 → Windows-1252 (Western misreading)',
+        story: 'The most classic mojibake of all: a UTF-8 web page opened as Western European. Every Chinese character splits into three pieces, and "å¤§" is everywhere.',
+      },
     },
     {
       id: 'utf8-as-1252-lost', name: 'UTF-8 → Windows-1252（复制时丢了隐形字节）', chain: [L('utf-8', 'windows-1252')],
       opts: { dropInvisible: true }, sample: '“Don’t panic!”',
       story: '弯引号 ” 的末字节 0x9D 在 Windows-1252 里是隐形控制符，复制粘贴时悄悄消失，只剩 "â€"。',
+      en: {
+        name: 'UTF-8 → Windows-1252 (invisible bytes lost in copying)',
+        story: 'The last byte of the closing curly quote ” is 0x9D, an invisible control character in Windows-1252. It quietly vanishes on copy and paste, leaving only "â€".',
+      },
     },
     {
       id: 'utf8-as-gbk', name: 'UTF-8 → GBK（汉字错配）', chain: [L('utf-8', 'gbk')], opts: {},
       sample: '你好，世界',
       story: '简体中文 Windows 用 GBK 打开 UTF-8 文件，三字节的汉字被两两错配成生僻字，落单的字节变成 \uFFFD。',
+      en: {
+        name: 'UTF-8 → GBK (mismatched characters)',
+        story: 'Simplified Chinese Windows opens a UTF-8 file as GBK: the three-byte characters get paired off into obscure ones, and any byte left without a partner becomes \uFFFD.',
+      },
     },
     {
       id: 'gbk-as-1252', name: 'GBK → Windows-1252（中文网页西渡）', chain: [L('gbk', 'windows-1252')], opts: {},
       sample: '你好，世界',
       story: '没写 charset 的 GBK 网页被欧美浏览器按西欧编码显示，汉字变成一串带帽子的拉丁字母 "ÄãºÃ"。',
+      en: {
+        name: 'GBK → Windows-1252 (a Chinese page goes west)',
+        story: 'A GBK web page without a charset is shown by a Western browser as Western European, and the Chinese turns into a string of accented Latin letters like "ÄãºÃ".',
+      },
     },
     {
       id: 'gbk-as-latin1', name: 'GBK → ISO-8859-1（Java 老问题）', chain: [L('gbk', 'iso-8859-1')], opts: {},
       sample: '中文参数',
       story: '老版 Tomcat 默认按 ISO-8859-1 解析请求参数，于是诞生了那句咒语：new String(s.getBytes("ISO-8859-1"), "GBK")。',
+      en: {
+        name: 'GBK → ISO-8859-1 (the old Java problem)',
+        story: 'Old versions of Tomcat decoded request parameters as ISO-8859-1 by default, and so a famous incantation was born: new String(s.getBytes("ISO-8859-1"), "GBK").',
+      },
     },
     {
       id: 'utf8-as-sjis', name: 'UTF-8 → Shift_JIS（縺字刷屏）', chain: [L('utf-8', 'shift_jis')], opts: {},
       sample: 'こんにちは',
       story: '日文 Windows 用 Shift_JIS 打开 UTF-8 文本，平假名的公共前缀 E3 81 反复被读成同一个汉字「縺」。',
+      en: {
+        name: 'UTF-8 → Shift_JIS (a flood of "縺")',
+        story: 'Japanese Windows opens UTF-8 text as Shift_JIS, and the common hiragana prefix E3 81 is read over and over as the same kanji, "縺".',
+      },
     },
     {
       id: 'sjis-as-1252', name: 'Shift_JIS → Windows-1252（下逗号雨）', chain: [L('shift_jis', 'windows-1252')], opts: {},
       sample: 'こんにちは',
       story: '日本的老网页或游戏存档被西欧软件打开，平假名的首字节 0x82 化作一排低位逗号 "‚"。',
+      en: {
+        name: 'Shift_JIS → Windows-1252 (low-comma rain)',
+        story: 'Old Japanese web pages or game saves opened by Western software: the hiragana lead byte 0x82 turns into a row of low commas "‚".',
+      },
     },
     {
       id: 'utf8-as-1251', name: 'UTF-8 → Windows-1251（РС 叠字）', chain: [L('utf-8', 'windows-1251')], opts: {},
       sample: 'Привет, мир!',
       story: '俄文 Windows 把 UTF-8 当 CP1251 打开，每个俄文字母变成以 Р 或 С 打头的两个字母。',
+      en: {
+        name: 'UTF-8 → Windows-1251 (the Р/С stutter)',
+        story: 'Russian Windows opens UTF-8 as CP1251, and every Russian letter becomes two letters, the first one always Р or С.',
+      },
     },
     {
       id: 'koi8-as-1251', name: 'KOI8-R → Windows-1251（俄网编码战争）', chain: [L('koi8-r', 'windows-1251')], opts: {},
       sample: 'Привет',
       story: '90 年代的俄罗斯：Unix 邮件用 KOI8-R，Windows 用 CP1251，两边互发的信件像被打乱了大小写。',
+      en: {
+        name: 'KOI8-R → Windows-1251 (the Russian encoding wars)',
+        story: 'Russia in the 1990s: Unix mail spoke KOI8-R, Windows spoke CP1251, and letters sent between the two looked as if someone had shuffled the capitals.',
+      },
     },
     {
       id: '1251-as-koi8', name: 'Windows-1251 → KOI8-R（反向事故）', chain: [L('windows-1251', 'koi8-r')], opts: {},
       sample: 'Привет',
       story: 'Windows 上写的俄文信件被 Unix 邮件客户端按 KOI8-R 显示，同样的战争，另一条战线。',
+      en: {
+        name: 'Windows-1251 → KOI8-R (the reverse accident)',
+        story: 'A Russian letter written on Windows, displayed as KOI8-R by a Unix mail client: same war, different front.',
+      },
     },
     {
       id: 'koi8-as-latin1', name: 'KOI8-R → ISO-8859-1（拉丁网关）', chain: [L('koi8-r', 'iso-8859-1')], opts: {},
       sample: 'Привет',
       story: 'KOI8 的字母排布让西里尔字母去掉最高位后近似大小写颠倒的拉丁转写，即使穿过只认 Latin-1 的网关也能勉强辨认。',
+      en: {
+        name: 'KOI8-R → ISO-8859-1 (the Latin gateway)',
+        story: 'KOI8 was laid out so that a Cyrillic letter minus its high bit is a rough Latin transliteration with the case flipped, so the text stays barely legible even after passing through a Latin-1-only gateway.',
+      },
     },
     {
       id: 'big5-as-gbk', name: 'Big5 → GBK（繁简互认）', chain: [L('big5', 'gbk')], opts: {},
       sample: '繁體中文',
       story: '台湾或香港的 Big5 文本被大陆 GBK 系统打开：看上去还是汉字，却句句不知所云。',
+      en: {
+        name: 'Big5 → GBK (Traditional read as Simplified)',
+        story: 'Big5 text from Taiwan or Hong Kong opened on a mainland GBK system: it still looks like Chinese, but not one sentence makes sense.',
+      },
     },
     {
       id: 'gbk-as-big5', name: 'GBK → Big5（简繁互认）', chain: [L('gbk', 'big5')], opts: {},
       sample: '简体中文',
       story: '同一串字节在海峡两岸读出两种"中文"，读不出来的地方只好留下 \uFFFD。',
+      en: {
+        name: 'GBK → Big5 (Simplified read as Traditional)',
+        story: 'The same bytes read as two different kinds of "Chinese" on either side of the Taiwan Strait; wherever nothing can be read, a \uFFFD is left behind.',
+      },
     },
     {
       id: 'big5-as-1252', name: 'Big5 → Windows-1252（繁体西渡）', chain: [L('big5', 'windows-1252')], opts: {},
       sample: '大家好',
       story: 'Big5 的第二字节常落在 ASCII 区，所以繁体乱码里会混进正常字母，"大家好"变成 "¤j®a¦n"。',
+      en: {
+        name: 'Big5 → Windows-1252 (Traditional Chinese goes west)',
+        story: 'The second byte of a Big5 character often falls in the ASCII range, so ordinary letters sneak into Traditional Chinese mojibake: "大家好" becomes "¤j®a¦n".',
+      },
     },
     {
       id: 'gbk-as-cp437', name: 'GBK → CP437（ZIP 文件名）', chain: [L('gbk', 'cp437')], opts: {},
       sample: '你好.txt',
       story: '中文 Windows 打包的 ZIP 没有设置 UTF-8 标志位，换个系统解压，文件名按 ZIP 默认的 CP437 读成了制表符。',
+      en: {
+        name: 'GBK → CP437 (ZIP file names)',
+        story: 'A ZIP made on Chinese Windows without the UTF-8 flag gets unpacked on another system, and the file names are read in CP437, the ZIP default, as box-drawing characters.',
+      },
     },
     {
       id: 'utf8-as-cp437', name: 'UTF-8 → CP437（ZIP 文件名）', chain: [L('utf-8', 'cp437')], opts: {},
       sample: '报告.docx',
       story: 'ZIP 规范规定文件名默认是 CP437；工具写入了 UTF-8 却忘了置第 11 位标志，解压出来全是方框画线符。',
+      en: {
+        name: 'UTF-8 → CP437 (ZIP file names)',
+        story: 'The ZIP spec says file names are CP437 by default. The tool wrote UTF-8 but forgot to set flag bit 11, so the unpacked names are nothing but box-drawing lines.',
+      },
     },
     {
       id: 'sjis-as-gbk', name: 'Shift_JIS → GBK（没转区的日文游戏）', chain: [L('shift_jis', 'gbk')], opts: {},
       sample: '日本語のゲーム',
       story: '在简体中文 Windows 上直接运行日文游戏，菜单变成一串似是而非的中文，玩家们只好求助"转区"工具。',
+      en: {
+        name: 'Shift_JIS → GBK (a Japanese game without locale emulation)',
+        story: 'Run a Japanese game straight on Simplified Chinese Windows and its menus turn into Chinese-looking nonsense, so players had to call in locale-emulation tools.',
+      },
     },
     {
       id: 'gbk-as-sjis', name: 'GBK → Shift_JIS（中文软件去日本）', chain: [L('gbk', 'shift_jis')], opts: {},
       sample: '中文字幕',
       story: '中文程序跑在日文系统上，GBK 字节被 Shift_JIS 重新切分，半角片假名乱入。',
+      en: {
+        name: 'GBK → Shift_JIS (Chinese software visits Japan)',
+        story: 'A Chinese program running on a Japanese system: Shift_JIS slices the GBK bytes up differently, and half-width katakana crash the party.',
+      },
     },
     {
       id: 'euckr-as-1252', name: 'EUC-KR → Windows-1252（韩文西渡）', chain: [L('euc-kr', 'windows-1252')], opts: {},
       sample: '안녕하세요',
       story: '韩文网页被西欧编码打开，每个谚文音节变成两个 Latin-1 字符（重音字母或 ¾、¼ 之类的符号）。',
+      en: {
+        name: 'EUC-KR → Windows-1252 (Korean goes west)',
+        story: 'A Korean web page opened as Western European: every Hangul syllable turns into two Latin-1 characters (accented letters or symbols like ¾ and ¼).',
+      },
     },
     {
       id: 'eucjp-as-sjis', name: 'EUC-JP → Shift_JIS（Unix 与 Windows）', chain: [L('euc-jp', 'shift_jis')], opts: {},
       sample: 'テキスト',
       story: '日本互联网早期：Unix 服务器上的 EUC-JP 文本被 Windows 按 Shift_JIS 打开，半角假名四处乱飞。',
+      en: {
+        name: 'EUC-JP → Shift_JIS (Unix meets Windows)',
+        story: 'The early Japanese internet: EUC-JP text from Unix servers opened as Shift_JIS on Windows, with half-width kana flying everywhere.',
+      },
     },
     {
       id: 'utf8-as-mac', name: 'UTF-8 → Mac OS Roman（经典 Mac）', chain: [L('utf-8', 'macintosh')], opts: {},
       sample: 'café crème',
       story: '经典 Mac 软件把 UTF-8 当作 Mac OS Roman 来读，"é" 变成了 "√©"。',
+      en: {
+        name: 'UTF-8 → Mac OS Roman (classic Mac)',
+        story: 'Classic Mac software reads UTF-8 as Mac OS Roman, and "é" becomes "√©".',
+      },
     },
     {
       id: '1252-as-utf8', name: 'Windows-1252 → UTF-8（问号钻石，不可逆）', chain: [L('windows-1252', 'utf-8')], opts: {},
       sample: 'Résumé café',
       story: '西欧编码的文本被当成 UTF-8 解码，单独的高位字节不是合法的 UTF-8，直接变成 \uFFFD，原字节就此丢失。',
+      en: {
+        name: 'Windows-1252 → UTF-8 (question-mark diamonds, irreversible)',
+        story: 'Western-encoded text decoded as UTF-8: a lone high byte is not valid UTF-8, so it becomes \uFFFD on the spot and the original byte is lost for good.',
+      },
     },
     {
       id: 'ascii-as-utf16le', name: 'ASCII → UTF-16LE（记事本的 Bush hid the facts）', chain: [L('windows-1252', 'utf-16le')], opts: {},
       sample: 'Bush hid the facts',
       story: 'Windows XP 记事本靠 IsTextUnicode 猜编码，一段偶数长度的纯英文被误判为 UTF-16LE，两个字母拼成一个汉字。',
+      en: {
+        name: 'ASCII → UTF-16LE (Notepad\'s "Bush hid the facts")',
+        story: 'Windows XP Notepad guessed encodings with IsTextUnicode, and a plain English sentence of even length was mistaken for UTF-16LE: every two letters fused into one Chinese character.',
+      },
     },
     {
       id: 'utf8-as-1252-x2', name: '双层 UTF-8 → Windows-1252', chain: [L('utf-8', 'windows-1252'), L('utf-8', 'windows-1252')], opts: {},
       sample: '你好',
       story: '数据被"修复"了两次：每多一次错误转换，乱码就膨胀一圈，像树的年轮。',
+      en: {
+        name: 'UTF-8 → Windows-1252, two layers',
+        story: 'The data was "fixed" twice: each extra wrong conversion adds another ring of mojibake, like a tree growing a new ring every year.',
+      },
     },
   ];
 
@@ -257,124 +410,226 @@
       relic: 'å¤§å®¶å¥½', expect: '大家好',
       chain: [L('utf-8', 'windows-1252')], opts: {},
       blurb: '镇馆之宝：UTF-8 的三字节汉字被 Windows-1252 逐字节拆开，每个汉字都裂成 "å" 打头的三块碎片。',
+      en: {
+        title: '“大家好” · The Western Misreading',
+        blurb: 'The pride of the collection: Windows-1252 pried each three-byte UTF-8 character apart one byte at a time, so "Hello, everyone" shattered into three-piece shards that all begin with "å".',
+      },
     },
     {
       id: 'nihao-gbk-lossy', title: '「你好，世界」· GBK 错配残片',
       relic: '浣犲ソ锛屼笘鐣\uFFFD', expect: '你好，世界',
       chain: [L('utf-8', 'gbk')], opts: {},
       blurb: 'UTF-8 字节被 GBK 两两配对成生僻字；15 个字节是奇数，最后落单的 0x8C 化作 \uFFFD，「界」只剩半截，需要修复师补全。',
+      en: {
+        title: '“你好，世界” · Misread as GBK, Last Byte Lost',
+        blurb: 'GBK paired the UTF-8 bytes off two by two into obscure characters. But "你好，世界" is 15 bytes long in UTF-8, an odd number: the last byte, 0x8C, was left without a partner and became \uFFFD, so "界" ("world") is only half there. A job for the conservator.',
+      },
     },
     {
       id: 'nihao-gbk-1252', title: '「你好，世界」· GBK 西渡型',
       relic: 'ÄãºÃ£¬ÊÀ½ç', expect: '你好，世界',
       chain: [L('gbk', 'windows-1252')], opts: {},
       blurb: '一张没写 charset 的 GBK 网页漂洋过海，被当成西欧编码，五个字变成十个带帽子的拉丁字母和符号。',
+      en: {
+        title: '“你好，世界” · GBK Goes West',
+        blurb: 'A GBK web page with no charset declared sailed overseas and was read as Western European: five characters ("Hello, world") became ten Latin letters and symbols, many of them sporting accent marks.',
+      },
     },
     {
       id: 'kunjinkao', title: '「锟斤拷」· 传说级名器',
       relic: '锟斤拷', expect: null, source: '\uFFFD\uFFFD',
       chain: [L('utf-8', 'gbk')], opts: {},
       blurb: '两个 U+FFFD 的 UTF-8 字节 EF BF BD EF BF BD 被 GBK 读成"锟斤拷"。原文早在变成 \uFFFD 时就已丢失，神仙难救。',
+      en: {
+        title: '“锟斤拷” · A Legendary Relic',
+        blurb: 'The UTF-8 bytes of two U+FFFD characters, EF BF BD EF BF BD, read by GBK as "锟斤拷". The original text was gone the moment it turned into \uFFFD; not even the gods can save it now.',
+      },
     },
     {
       id: 'tangtangtang', title: '「烫烫烫」· 调试器遗迹',
       relic: '烫烫烫', expect: null,
       bytes: 'CC CC CC CC CC CC', misreadAs: 'gbk',
       blurb: 'MSVC 调试版把未初始化的栈内存填成 0xCC，按 GBK 显示正好是"烫"。这里本来就没有文字，只有程序员的冷汗。',
+      en: {
+        title: '“烫烫烫” · Ruins of a Debugger',
+        blurb: 'MSVC debug builds fill uninitialized stack memory with 0xCC, which GBK happens to display as "烫" ("scalding hot"). There was never any text here, only a programmer\'s cold sweat.',
+      },
     },
     {
       id: 'konnichiwa-utf8-sjis', title: '「こんにちは」· 縺字刷屏型',
       relic: '縺薙ｓ縺ｫ縺｡縺ｯ', expect: 'こんにちは',
       chain: [L('utf-8', 'shift_jis')], opts: {},
       blurb: '平假名的 UTF-8 大多以 E3 81 开头，Shift_JIS 把它读成「縺」，于是满屏「縺」，中间夹着半角片假名。',
+      en: {
+        title: '“こんにちは” · A Flood of “縺”',
+        blurb: 'Most hiragana start with E3 81 in UTF-8, which Shift_JIS reads as "縺". Hence "縺" wall to wall, with half-width katakana wedged in between.',
+      },
     },
     {
       id: 'konnichiwa-sjis-1252', title: '「こんにちは」· 下逗号雨',
       relic: '‚±‚ñ‚É‚¿‚Í', expect: 'こんにちは',
       chain: [L('shift_jis', 'windows-1252')], opts: {},
       blurb: 'Shift_JIS 平假名的首字节都是 0x82，在 Windows-1252 里恰好是低位逗号 "‚"，于是每个假名前都下了一场逗号雨。',
+      en: {
+        title: '“こんにちは” · A Shower of Low Commas',
+        blurb: 'Every Shift_JIS hiragana starts with the byte 0x82, which in Windows-1252 is the low comma "‚", so a little shower of commas falls in front of every kana.',
+      },
     },
     {
       id: 'privet-mir', title: '「Привет, мир!」· РС 叠字型',
       relic: 'РџСЂРёРІРµС‚, РјРёСЂ!', expect: 'Привет, мир!',
       chain: [L('utf-8', 'windows-1251')], opts: {},
       blurb: '俄文字母的 UTF-8 首字节是 D0 或 D1，在 CP1251 里正是 Р 和 С，于是每个字母都长出一个 Р/С 前缀。',
+      en: {
+        title: '“Привет, мир!” · The Р/С Stutter',
+        blurb: 'In UTF-8, Russian letters start with D0 or D1, which CP1251 shows as exactly Р and С, so every letter sprouts an Р or С in front of it.',
+      },
     },
     {
       id: 'double-layer', title: '「文物」· 双层地层',
       relic: 'Ã¦â€“â€¡Ã§â€°Â©', expect: '文物',
       chain: [L('utf-8', 'windows-1252'), L('utf-8', 'windows-1252')], opts: {},
       blurb: '同一个错误犯了两次：第一层把汉字拆成 "æ"、"ç" 之类，第二层再把这些字母拆成 "Ã¦"、"Ã§"，地层清晰可数。',
+      en: {
+        title: '“文物” · Two Strata Deep',
+        blurb: 'The same mistake, made twice: the first layer split the characters into pieces like "æ" and "ç", and the second split those letters again into "Ã¦" and "Ã§". You can count the strata.',
+      },
     },
     {
       id: 'notepad-bug', title: '「this app can break」· 记事本之谜',
       relic: '桴獩愠灰挠湡戠敲歡', expect: 'this app can break',
       chain: [L('windows-1252', 'utf-16le')], opts: {},
       blurb: 'Windows XP 记事本的 IsTextUnicode 猜错了：18 个 ASCII 字符被当成 UTF-16LE，两两拼成 9 个汉字。',
+      en: {
+        title: '“this app can break” · The Notepad Mystery',
+        blurb: 'Windows XP\'s Notepad, relying on the IsTextUnicode API, guessed wrong: 18 ASCII characters were taken for UTF-16LE and fused in pairs into 9 Chinese characters.',
+      },
     },
     {
       id: 'curly-quotes', title: '「“Don’t panic!”」· 弯引号断尾',
       relic: 'â€œDonâ€™t panic!â€', expect: '“Don’t panic!”',
       chain: [L('utf-8', 'windows-1252')], opts: { dropInvisible: true },
       blurb: '“ 和 ’ 变成了 "â€œ"、"â€™"；结尾的 ” 更惨，末字节 0x9D 是隐形控制符，复制时被吞掉，只剩 "â€"。',
+      en: {
+        title: '“Don’t panic!” · Curly Quotes, Clipped',
+        blurb: 'The opening “ and the apostrophe ’ turned into "â€œ" and "â€™". The closing ” fared worse: its last byte, 0x9D, is an invisible control character in Windows-1252 and got swallowed on copy and paste, leaving only "â€".',
+      },
     },
     {
       id: 'dajiahao-big5', title: '「大家好」· 繁体西渡型',
       relic: '¤j®a¦n', expect: '大家好',
       chain: [L('big5', 'windows-1252')], opts: {},
       blurb: 'Big5 的第二字节常落在 ASCII 区，所以乱码里夹着 "j"、"a"、"n" 这样的正常字母。',
+      en: {
+        title: '“大家好” · Traditional Chinese Goes West',
+        blurb: 'The second byte of a Big5 character often lands in the ASCII range, so perfectly ordinary letters like "j", "a", and "n" turn up in the middle of the mojibake.',
+      },
     },
     {
       id: 'zip-filename', title: '「你好.txt」· ZIP 文件名',
       relic: '─π║├.txt', expect: '你好.txt',
       chain: [L('gbk', 'cp437')], opts: {},
       blurb: '中文 Windows 打包的压缩包在别的系统上解压，文件名被按 ZIP 默认的 DOS 代码页 CP437 解读，汉字变成了制表符。',
+      en: {
+        title: '“你好.txt” · A ZIP File Name',
+        blurb: 'An archive zipped on Chinese Windows gets unpacked on another system, which reads the file names in CP437, the DOS code page ZIP assumes by default. The Chinese characters turn into box-drawing lines.',
+      },
     },
     {
       id: 'privet-koi8', title: '「Привет」· 编码战争残骸',
       relic: 'рТЙЧЕФ', expect: 'Привет',
       chain: [L('koi8-r', 'windows-1251')], opts: {},
       blurb: 'KOI8-R 写的信被 CP1251 打开：字母还是西里尔字母，却大小写颠倒、张冠李戴，这是 90 年代俄语网络的日常。',
+      en: {
+        title: '“Привет” · Wreckage of the Encoding Wars',
+        blurb: 'A letter written in KOI8-R, opened as CP1251: still Cyrillic, but with the case flipped and every letter mistaken for another. Just another day on the 1990s Russian internet.',
+      },
     },
     {
       id: 'annyeong', title: '「안녕하세요」· 韩文西渡型',
       relic: '¾È³çÇÏ¼¼¿ä', expect: '안녕하세요',
       chain: [L('euc-kr', 'windows-1252')], opts: {},
       blurb: '每个谚文音节的两个 EUC-KR 字节都落在 Latin-1 的高半区，问候语变成了 "¾È³ç" 这样的重音字母和分数符号。',
+      en: {
+        title: '“안녕하세요” · Korean Goes West',
+        blurb: 'Both EUC-KR bytes of every Hangul syllable land in the upper half of Latin-1, so a friendly "hello" turns into accented letters and fraction signs like "¾È³ç".',
+      },
     },
     {
       id: 'emoji-party', title: '「Party time 🎉😀」· 四字节表情',
       relic: 'Party time ðŸŽ‰ðŸ˜€', expect: 'Party time 🎉😀',
       chain: [L('utf-8', 'windows-1252')], opts: {},
       blurb: '表情符号在 UTF-8 里占 4 个字节，以 F0 9F 开头，被读成 "ðŸ"——派对还没开始，乱码先到了。',
+      en: {
+        title: '“Party time 🎉😀” · Four-Byte Emoji',
+        blurb: 'An emoji takes four bytes in UTF-8, starting with F0 9F, which read as "ðŸ". The party hasn\'t even started and the mojibake has already arrived.',
+      },
     },
     {
       id: 'percent-escape', title: '「%E4%BD%A0…」· URL 转义层',
       relic: '%E4%BD%A0%E5%A5%BD', expect: '你好',
       escape: { scheme: 'percent', encoding: 'utf-8' },
       blurb: '这不算乱码，是被 URL 编码封存的 UTF-8 字节：先拆掉 % 封条，再按 UTF-8 解读。',
+      en: {
+        title: '“%E4%BD%A0…” · A URL Escape Layer',
+        blurb: 'Not mojibake at all: these are UTF-8 bytes sealed inside URL encoding. Break the % seals first, then read the bytes as UTF-8.',
+      },
     },
     {
       id: 'unicode-escape', title: '「\\u4f60\\u597d」· JSON 转义层',
       relic: '\\u4f60\\u597d', expect: '你好',
       escape: { scheme: 'unicode-escape' },
       blurb: 'JSON 序列化时用了 ASCII 安全模式（比如 Python json.dumps 默认的 ensure_ascii=True），每个汉字都被写成 \\uXXXX 码位。',
+      en: {
+        title: '“\\u4f60\\u597d” · A JSON Escape Layer',
+        blurb: 'The JSON was serialized in ASCII-safe mode (Python\'s json.dumps defaults to ensure_ascii=True), so every Chinese character was written out as a \\uXXXX code point.',
+      },
     },
     {
       id: 'sao-paulo', title: '「São Paulo café」· 重音字母型',
       relic: 'SÃ£o Paulo cafÃ©', expect: 'São Paulo café',
       chain: [L('utf-8', 'windows-1252')], opts: {},
       blurb: '带重音的拉丁字母在 UTF-8 里以 C3 开头，被西欧编码读成 "Ã"，咖啡馆从此叫 "cafÃ©"。',
+      en: {
+        title: '“São Paulo café” · Accented Letters',
+        blurb: 'In UTF-8, accented Latin letters start with C3, which a Western European decoder reads as "Ã". From then on, the café goes by "cafÃ©".',
+      },
     },
     {
       id: 'resume-lost', title: '「Résumé café」· 问号钻石',
       relic: 'R\uFFFDsum\uFFFD caf\uFFFD', expect: null, source: 'Résumé café',
       chain: [L('windows-1252', 'utf-8')], opts: {},
       blurb: '方向反了：西欧编码的 é（0xE9）在 UTF-8 里不合法，解码器只能放一个 \uFFFD 了事，原字节已经不在了。',
+      en: {
+        title: '“Résumé café” · The Question-Mark Diamond',
+        blurb: 'This time it ran backwards: a Western-encoded é (0xE9) is not valid UTF-8, so the decoder could only drop in a \uFFFD and move on. The original bytes are already gone.',
+      },
     },
   ];
 
-  const Forge = { corrupt, escape, PRESETS, GALLERY };
+  /**
+   * Shallow copies of a list with the text fields swapped for the locale's `en` versions
+   * (zh-CN keeps the originals). Relics, chains, samples and recipes are data and never change.
+   */
+  function localized(list, fields, locale) {
+    const en = isEn(locale);
+    return list.map((item) => {
+      const copy = Object.assign({}, item);
+      if (en && item.en) for (const f of fields) if (item.en[f]) copy[f] = item.en[f];
+      return copy;
+    });
+  }
+
+  const Forge = {
+    corrupt,
+    escape,
+    PRESETS,
+    GALLERY,
+    /** GALLERY with title / blurb in the given locale (docs §11.3). */
+    gallery: (locale) => localized(GALLERY, ['title', 'blurb'], locale),
+    /** PRESETS with name / story in the given locale (docs §11.3). */
+    presets: (locale) => localized(PRESETS, ['name', 'story'], locale),
+  };
 
   MBX.Forge = Forge;
   if (typeof module === 'object' && module.exports) module.exports = Forge;

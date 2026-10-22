@@ -30,6 +30,35 @@
   'use strict';
   const MBX = (root.MBX = root.MBX || {});
 
+  /**
+   * UI language for user-visible text (docs §11.2), by the one rule every module shares:
+   * MBX.I18n.resolve(arg), where arg is a locale string or an options object with `locale`. A
+   * supported tag wins ('en', ' en_US ', 'zh-TW'...); anything else follows the current UI
+   * language. Without src/i18n.js the same tag rule applies and everything else is zh-CN. Read at
+   * call time so a language switch applies to the next call.
+   * Only text fields depend on it: the search itself never looks at the locale.
+   */
+  function localeOf(arg) {
+    const I18n = MBX.I18n;
+    if (I18n && typeof I18n.resolve === 'function') {
+      try {
+        return I18n.resolve(arg) === 'en-US' ? 'en-US' : 'zh-CN';
+      } catch (_) { /* fall through */ }
+    }
+    // Without I18n.resolve: the I18n.normalize tag rule, then the current language, then zh-CN.
+    const tag = typeof arg === 'string' ? arg : arg && typeof arg === 'object' ? arg.locale : null;
+    const s = typeof tag === 'string' ? tag.trim() : '';
+    if (/^en(?:[-_]|$)/i.test(s)) return 'en-US';
+    if (/^zh(?:[-_]|$)/i.test(s)) return 'zh-CN';
+    if (I18n && typeof I18n.getLocale === 'function') {
+      try {
+        return /^en(?:[-_]|$)/i.test(String(I18n.getLocale()).trim()) ? 'en-US' : 'zh-CN';
+      } catch (_) { /* fall through */ }
+    }
+    return 'zh-CN';
+  }
+  const isEn = (arg) => localeOf(arg) === 'en-US';
+
   const FFFD = '\uFFFD';
   const LN = Math.log;
 
@@ -199,6 +228,15 @@
     'unicode-escape': '\\u Unicode 转义',
     'html-entity': 'HTML 实体',
   };
+  // ...and their en-US canonical names (Engine.schemeName picks one by locale).
+  const SCHEME_NAMES_EN = {
+    percent: 'URL percent-encoding',
+    'hex-escape': '\\x hex escapes',
+    'quoted-printable': 'Quoted-Printable encoding',
+    'hex-dump': 'Hex byte string',
+    'unicode-escape': '\\u Unicode escapes',
+    'html-entity': 'HTML entities',
+  };
 
   // ---------------------------------------------------------------------------
   // Signatures of famous relics. Byte facts are verified in tests/engine.test.js
@@ -208,34 +246,66 @@
     {
       id: 'kunjinkao', title: '锟斤拷', re: /(?:锟斤拷)+/g, bytes: 'EF BF BD EF BF BD', decoder: 'gbk', glyph: '锟斤拷', lost: true,
       note: '两个 U+FFFD（替换字符）的 UTF-8 字节 EF BF BD EF BF BD 被 GBK 两两配对，读成了「锟斤拷」。原文在变成 U+FFFD 的那一刻就已经丢失。',
+      en: {
+        title: '锟斤拷 (kūn jīn kǎo)',
+        note: 'The UTF-8 bytes of two U+FFFD replacement characters, EF BF BD EF BF BD, were paired off by GBK and read as "锟斤拷". The original text was already lost the moment it turned into U+FFFD.',
+      },
     },
     {
       id: 'kunjinkao-big5', title: '嚙踝蕭', re: /(?:嚙踝蕭)+/g, bytes: 'EF BF BD EF BF BD', decoder: 'big5', glyph: '嚙踝蕭', lost: true,
       note: '「锟斤拷」的繁体版：U+FFFD 的 UTF-8 字节 EF BF BD 被 Big5 读成「嚙踝蕭」，原文同样已经丢失。',
+      en: {
+        title: '嚙踝蕭 (niè huái xiāo)',
+        note: 'The Traditional Chinese edition of "锟斤拷": Big5 reads the UTF-8 bytes EF BF BD of U+FFFD as "嚙踝蕭". The original text is just as lost.',
+      },
     },
     {
       id: 'tangtangtang', title: '烫烫烫', re: /烫{2,}/g, bytes: 'CC CC', decoder: 'gbk', glyph: '烫', lost: true,
       note: 'MSVC 调试版把未初始化的栈内存填成 0xCC，两个 0xCC 按 GBK 读出来正是「烫」。这里从来就没有文字。',
+      en: {
+        title: '烫烫烫 (tàng tàng tàng)',
+        note: 'MSVC debug builds fill uninitialized stack memory with 0xCC, and two 0xCC bytes read as GBK are exactly "烫" ("scalding hot"). There was never any text here.',
+      },
     },
     {
       id: 'tuntuntun', title: '屯屯屯', re: /屯{2,}/g, bytes: 'CD CD', decoder: 'gbk', glyph: '屯', lost: true,
       note: 'MSVC 调试版把刚分配、未初始化的堆内存填成 0xCD，0xCDCD 按 GBK 读出来正是「屯」。',
+      en: {
+        title: '屯屯屯 (tún tún tún)',
+        note: 'MSVC debug builds fill freshly allocated, uninitialized heap memory with 0xCD, and 0xCDCD read as GBK is exactly "屯".',
+      },
     },
     {
       id: 'qiqiqi', title: '葺葺葺', re: /葺{2,}/g, bytes: 'DD DD', decoder: 'gbk', glyph: '葺', lost: true,
       note: 'MSVC 调试堆把已经释放的内存填成 0xDD，0xDDDD 按 GBK 读出来是「葺」：这是一块被 free 之后又被读取的内存。',
+      en: {
+        title: '葺葺葺 (qì qì qì)',
+        note: 'The MSVC debug heap fills freed memory with 0xDD, and 0xDDDD read as GBK is "葺": this is memory that was read after it had been freed.',
+      },
     },
     {
       id: 'utf8-bom-1252', title: 'ï»¿', re: /ï»¿/g, bytes: 'EF BB BF', decoder: 'windows-1252', glyph: 'ï»¿',
       note: 'UTF-8 的字节顺序标记 BOM（EF BB BF）被 Windows-1252 逐字节读成「ï»¿」，常见于用记事本另存的 UTF-8 文件。',
+      en: {
+        title: 'ï»¿',
+        note: 'The UTF-8 byte order mark (EF BB BF), read byte by byte as Windows-1252, becomes "ï»¿". A common sight in UTF-8 files saved with Notepad.',
+      },
     },
     {
       id: 'utf16-bom', title: 'ÿþ', re: /ÿþ|þÿ/g, bytes: 'FF FE', decoder: 'windows-1252', glyph: 'ÿþ',
       note: 'UTF-16 的字节顺序标记（小端 FF FE / 大端 FE FF）被单字节编码读成「ÿþ」/「þÿ」：这份文件其实是 UTF-16。',
+      en: {
+        title: 'ÿþ',
+        note: 'The UTF-16 byte order mark (little-endian FF FE / big-endian FE FF) read by a single-byte encoding as "ÿþ" / "þÿ": this file is really UTF-16.',
+      },
     },
     {
       id: 'utf16-nul', title: '字间夹 NUL', re: /(?:[\x20-\x7e]\x00){3,}|(?:\x00[\x20-\x7e]){3,}/g, bytes: '48 00 69 00', decoder: 'windows-1252', glyph: 'H\u0000i\u0000',
       note: 'UTF-16 文本被当成单字节编码读取：每个英文字母旁边都夹着一个 00 字节，显示成看不见的 NUL。',
+      en: {
+        title: 'NULs between the letters',
+        note: 'UTF-16 text read as a single-byte encoding: every English letter has a 00 byte tucked in beside it, which shows up as an invisible NUL.',
+      },
     },
     {
       id: 'replacement', title: '成片的 \uFFFD', re: /\uFFFD+/g, lost: true,
@@ -244,6 +314,10 @@
         return n >= 3 || n >= 0.3 * Math.max(1, visibleLength(text));
       },
       note: '替换字符 U+FFFD 表示"这里曾有解码失败的字节"。解码器只留下了一个占位符，原始字节已经不在了。',
+      en: {
+        title: 'A sea of \uFFFD',
+        note: 'The replacement character U+FFFD means "some bytes failed to decode here." The decoder left only a placeholder behind; the original bytes are gone.',
+      },
     },
     {
       // Runs of '?' standing where words or field values were ("Name: ??", "Hello ????,"), not
@@ -257,21 +331,32 @@
         return ok ? runs[0] : null;
       },
       note: '文字被转换到不支持它的字符集时，每个装不下的字符都被替换成了「?」，原文已经无法推回。',
+      en: {
+        title: 'Wall-to-wall question marks',
+        note: 'The text was converted to a character set that could not hold it, and every character that did not fit was replaced with "?". There is no way back to the original.',
+      },
     },
   ];
 
   // Public, data-only view of the signature table (the regular expressions stay private).
+  // title / note are zh-CN; `en` holds the en-US pair (Engine.signatures(locale) swaps them in).
   const SIGNATURES = Object.freeze(
     SIG_DEFS.map((d) => Object.freeze({
       id: d.id, title: d.title, pattern: d.re.source, bytes: d.bytes || null, decoder: d.decoder || null,
-      glyph: d.glyph || null, irrecoverable: !!d.lost, note: d.note,
+      glyph: d.glyph || null, irrecoverable: !!d.lost, note: d.note, en: Object.freeze(Object.assign({}, d.en)),
     })).concat([Object.freeze({
       id: 'notepad-bush', title: 'Bush hid the facts', pattern: null, bytes: '42 75 73 68', decoder: 'utf-16le', glyph: '畂桳',
       irrecoverable: false,
       note: 'Windows XP 记事本用 IsTextUnicode 猜编码，把一段纯 ASCII 英文误判成 UTF-16LE，两个字母拼成一个汉字。',
+      en: Object.freeze({
+        title: 'Bush hid the facts',
+        note: 'Windows XP Notepad guessed the encoding with IsTextUnicode and mistook a run of plain ASCII English for UTF-16LE, gluing every two letters into one Chinese character.',
+      }),
     })])
   );
+  const SIGNATURES_EN = Object.freeze(SIGNATURES.map((s) => Object.freeze(Object.assign({}, s, { title: s.en.title, note: s.en.note }))));
   const BUSH_NOTE = SIGNATURES[SIGNATURES.length - 1].note;
+  const BUSH_NOTE_EN = SIGNATURES[SIGNATURES.length - 1].en.note;
   const LOST_SIGS = new Set(SIG_DEFS.filter((d) => d.lost).map((d) => d.id));
 
   // Mojibake signals strong enough to call an unexplained input "unknown" rather than "clean".
@@ -299,12 +384,18 @@
   }
 
   function codecs() {
-    if (!MBX.Codecs) throw new Error('MBX.Codecs 尚未加载（请先引入 src/codecs.js）');
+    if (!MBX.Codecs) {
+      throw new Error(isEn(null) ? 'MBX.Codecs is not loaded yet (include src/codecs.js first)'
+        : 'MBX.Codecs 尚未加载（请先引入 src/codecs.js）');
+    }
     return MBX.Codecs;
   }
 
   function scorer() {
-    if (!MBX.Scorer) throw new Error('MBX.Scorer 尚未加载（请先引入 src/scorer.js）');
+    if (!MBX.Scorer) {
+      throw new Error(isEn(null) ? 'MBX.Scorer is not loaded yet (include src/scorer.js first)'
+        : 'MBX.Scorer 尚未加载（请先引入 src/scorer.js）');
+    }
     return MBX.Scorer;
   }
 
@@ -452,6 +543,7 @@
     }
     return {
       C, S, opts, ids, asciiE,
+      locale: localeOf(opts), // text fields only (labels, language names, hints)
       explored: 0,
       deadline: now() + TUNE.TIME_BUDGET_MS,
       work: 0,
@@ -2044,8 +2136,45 @@
 
   const LAYER_WORDS = ['', '', '两层', '三层', '四层', '五层'];
 
-  /** One-line Chinese description of a chain, e.g. 'UTF-8 被误读为 Windows-1252（两层）'. */
-  function labelFor(steps, partial) {
+  /**
+   * One-line description of a chain in the given locale: zh-CN 'UTF-8 被误读为 Windows-1252（两层）',
+   * en-US 'UTF-8 misread as Windows-1252 (2 layers)'. Same clause structure in both languages
+   * (clauses joined by '，' / ', '), so label consumers can cut at clause boundaries.
+   */
+  function labelFor(steps, partial, locale) {
+    return locale === 'en-US' ? labelForEn(steps, partial) : labelForZh(steps, partial);
+  }
+
+  function labelForEn(steps, partial) {
+    const tc = steps.filter((s) => s.kind === 'transcode').reverse(); // formation order
+    let label = '';
+    if (tc.length) {
+      const same = tc.every((s) => s.trueEncoding === tc[0].trueEncoding && s.wrongDecoder === tc[0].wrongDecoder);
+      if (same) {
+        label = `${encName(tc[0].trueEncoding)} misread as ${encName(tc[0].wrongDecoder)}`;
+        if (tc.length > 1) label += ` (${tc.length} layers)`;
+      } else {
+        label = tc.map((s, k) => {
+          if (k === 0) return `${encName(s.trueEncoding)} misread as ${encName(s.wrongDecoder)}`;
+          return s.trueEncoding === tc[k - 1].wrongDecoder
+            ? `then misread as ${encName(s.wrongDecoder)}`
+            : `then saved as ${encName(s.trueEncoding)} and misread as ${encName(s.wrongDecoder)}`;
+        }).join(', ');
+      }
+    }
+    const esc = steps.filter((s) => s.kind === 'unescape');
+    if (esc.length) {
+      const what = esc.map((s) => SCHEME_NAMES_EN[s.scheme] + (s.trueEncoding ? ` (${encName(s.trueEncoding)} bytes)` : '')).join(' + ');
+      label = label ? `${what}, containing mojibake: ${label}` : what;
+    }
+    let repairs = 0;
+    for (const s of steps) repairs += (s.repairs || []).length;
+    if (repairs) label += `, ${repairs} ${repairs === 1 ? 'gap' : 'gaps'} repaired`;
+    if (partial) label = `Partial restoration: ${label}`;
+    return label;
+  }
+
+  function labelForZh(steps, partial) {
     const tc = steps.filter((s) => s.kind === 'transcode').reverse(); // formation order
     let label = '';
     if (tc.length) {
@@ -2094,8 +2223,8 @@
       score: ctx.score(output),
       steps,
       repairs: collectRepairs(steps),
-      lang: ctx.S.detectLang(output),
-      label: labelFor(steps, partial),
+      lang: ctx.S.detectLang(output, { locale: ctx.locale }),
+      label: labelFor(steps, partial, ctx.locale),
     };
   }
 
@@ -2342,7 +2471,8 @@
     return out;
   }
 
-  function findSignatures(text) {
+  function findSignatures(text, locale) {
+    const en = isEn(locale);
     const out = [];
     for (const def of SIG_DEFS) {
       let hit;
@@ -2353,7 +2483,7 @@
         hit = m && (!def.test || def.test(text, m)) ? { match: m[0], index: m.index } : null;
       }
       if (!hit) continue;
-      out.push({ id: def.id, title: def.title, match: hit.match, index: hit.index, note: def.note });
+      out.push({ id: def.id, title: en ? def.en.title : def.title, match: hit.match, index: hit.index, note: en ? def.en.note : def.note });
     }
     return out.sort((a, b) => a.index - b.index);
   }
@@ -2384,7 +2514,8 @@
     const bush = best.steps.some((s) => s.kind === 'transcode' && isUtf16(s.wrongDecoder) && !isUtf16(s.trueEncoding) &&
       /^[\x09\x0a\x0d\x20-\x7e]+$/.test(s.after) && (s.after.match(/[A-Za-z]/g) || []).length >= 4);
     if (bush && !result.signatures.some((s) => s.id === 'notepad-bush')) {
-      result.signatures.push({ id: 'notepad-bush', title: 'Bush hid the facts', match: result.input.slice(0, 24), index: 0, note: BUSH_NOTE });
+      const note = result.locale === 'en-US' ? BUSH_NOTE_EN : BUSH_NOTE;
+      result.signatures.push({ id: 'notepad-bush', title: 'Bush hid the facts', match: result.input.slice(0, 24), index: 0, note });
     }
   }
 
@@ -2474,7 +2605,7 @@
 
   function safeSignals(ctx, text) {
     try {
-      return ctx.S.mojibakeSignals(text);
+      return ctx.S.mojibakeSignals(text, { locale: ctx.locale });
     } catch (_) {
       return [];
     }
@@ -2492,7 +2623,7 @@
     ctx.input = text;
     const inputScore = ctx.score(text);
     const signals = safeSignals(ctx, text);
-    const signatures = findSignatures(text);
+    const signatures = findSignatures(text, ctx.locale);
     ctx.classicShape = signals.some((s) => CLASSIC_SIGNALS.has(s.type));
     const result = {
       input: text,
@@ -2503,6 +2634,7 @@
       signals,
       inputScore,
       stats: { explored: 0, ms: 0, truncated: false, budgetHit: false },
+      locale: ctx.locale, // the language of the text fields; the search is the same in every locale
     };
     const finish = () => {
       settleGuesses(result);
@@ -2668,6 +2800,15 @@
     SIGNATURES,
     DEFAULTS,
     pairPrior: (E, W) => pairPrior(E, W, null),
+    // i18n helpers (docs §11.3). Engine.SIGNATURES stays zh-CN (with an `en` pair on each entry).
+    SCHEME_NAMES: Object.freeze(Object.assign({}, SCHEME_NAMES)),
+    SCHEME_NAMES_EN: Object.freeze(Object.assign({}, SCHEME_NAMES_EN)),
+    /** Canonical display name of an escape scheme in the given locale (undefined if unknown). */
+    schemeName: (scheme, locale) => (isEn(locale) ? SCHEME_NAMES_EN : SCHEME_NAMES)[scheme],
+    /** The signature table with title / note in the given locale. */
+    signatures: (locale) => (isEn(locale) ? SIGNATURES_EN : SIGNATURES),
+    /** Hypothesis.label for a list of steps (steps[0] = surface); opts = { partial, locale }. */
+    chainLabel: (steps, opts) => labelFor(Array.isArray(steps) ? steps.filter(Boolean) : [], !!(opts && opts.partial), localeOf(opts)),
     // Exposed for tests and tuning; not part of the documented contract.
     _internals: {
       TUNE, parseEscapes, sampleOf, findSignatures,
