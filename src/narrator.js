@@ -66,6 +66,11 @@
    * 2. Small text helpers
    * ==================================================================== */
 
+  // The active locale pack (docs/ARCHITECTURE.md §11.3). Every user-visible word comes from it;
+  // narrate() / factsFor() swap it in for the duration of one synchronous call, so the helpers
+  // below keep their signatures. It is the zh-CN pack (built at the end of §7) at all other times.
+  let L = null;
+
   const cps = (s) => Array.from(s == null ? '' : String(s));
   const hex2 = (b) => (b & 0xff).toString(16).toUpperCase().padStart(2, '0');
   const uplus = (cp) => 'U+' + cp.toString(16).toUpperCase().padStart(4, '0');
@@ -82,13 +87,14 @@
   // Neutralise anything in user-derived text that could be mistaken for markup or
   // break a one-line quote. Full-width look-alikes keep the text readable.
   function safe(s) {
+    const sc = L.safeChars;
     return String(s == null ? '' : s)
-      .replace(/`/g, '｀')
-      .replace(/\*/g, '＊')
+      .replace(/`/g, sc.tick)
+      .replace(/\*/g, sc.star)
       .replace(/\r\n|\r|\n/g, '⏎')
       .replace(/\t/g, ' ')
       .replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, '▫')
-      .replace(/\uFEFF/g, '〔BOM〕');
+      .replace(/\uFEFF/g, sc.bom);
   }
 
   function clip(s, n) {
@@ -96,7 +102,13 @@
     return a.length > n ? a.slice(0, n).join('') + '…' : a.join('');
   }
 
-  const quote = (s, n) => '「' + safe(clip(s, n || 24)) + '」';
+  // A pack may pick other marks for text that already contains its own quotation marks
+  // (en-US nests “…” inside ‘…’); zh-CN has no qFor and always uses L.q.
+  const quote = (s, n) => {
+    const body = safe(clip(s, n || 24));
+    const q = L.qFor ? L.qFor(body) : L.q;
+    return q[0] + body + q[1];
+  };
   const stripMarkup = (s) => String(s).replace(/\*\*/g, '').replace(/`/g, '');
   const countOf = (s, ch) => cps(s).filter((c) => c === ch).length;
   const isNum = (x) => typeof x === 'number' && isFinite(x);
@@ -141,17 +153,18 @@
     0xfeff: '字节顺序标记 BOM',
   };
 
-  // Returns a Chinese description for characters that would be invisible or
+  // Returns a (localized) description for characters that would be invisible or
   // misleading if printed raw; null for ordinary visible characters.
   function invisibleKind(cp) {
-    if (INVISIBLE_NAMES[cp]) return INVISIBLE_NAMES[cp];
-    if (cp <= 0x1f || cp === 0x7f) return 'C0 控制符';
-    if (cp >= 0x80 && cp <= 0x9f) return 'C1 控制符';
-    if (cp >= 0xe000 && cp <= 0xf8ff) return '私用区字符';
-    if (cp >= 0xd800 && cp <= 0xdfff) return '孤立代理项';
-    if (cp === 0x20) return '空格';
+    const I = L.INVISIBLE;
+    if (I.names[cp]) return I.names[cp];
+    if (cp <= 0x1f || cp === 0x7f) return I.c0;
+    if (cp >= 0x80 && cp <= 0x9f) return I.c1;
+    if (cp >= 0xe000 && cp <= 0xf8ff) return I.pua;
+    if (cp >= 0xd800 && cp <= 0xdfff) return I.surrogate;
+    if (cp === 0x20) return I.space;
     try {
-      if (/[\p{Z}\p{Cf}\p{Mn}\p{Me}\p{Cn}\p{Co}]/u.test(String.fromCodePoint(cp))) return '不可见字符';
+      if (/[\p{Z}\p{Cf}\p{Mn}\p{Me}\p{Cn}\p{Co}]/u.test(String.fromCodePoint(cp))) return I.invisible;
     } catch (_) { /* engines without property escapes: treat as visible */ }
     return null;
   }
@@ -161,18 +174,23 @@
     if (!ch) return '`?`';
     const cp = ch.codePointAt(0);
     const kind = invisibleKind(cp);
-    if (kind) return '`' + uplus(cp) + '`（' + kind + '）';
+    if (kind) return '`' + uplus(cp) + '`' + L.paren(kind);
     if (ch === '`' || ch === '*') return '`' + uplus(cp) + '`';
     return '`' + ch + '`';
   }
 
-  // An original (correct) character, shown in Chinese corner quotes.
+  // A pack whose quotation marks are themselves common text characters (“ ” in English) shows a
+  // quote-like character as code instead, so “”” never appears. zh-CN has no such rule.
+  const quoteLike = (ch) => !!(L.quoteLike && L.quoteLike.test(ch));
+
+  // An original (correct) character, shown in the locale's quotation marks (「」 / “”).
   function showChar(ch) {
-    if (!ch) return '「?」';
+    if (!ch) return L.q[0] + '?' + L.q[1];
     const cp = ch.codePointAt(0);
     const kind = invisibleKind(cp);
-    if (kind) return '`' + uplus(cp) + '`（' + kind + '）';
-    return '「' + safe(ch) + '」';
+    if (kind) return '`' + uplus(cp) + '`' + L.paren(kind);
+    if (quoteLike(ch)) return '`' + ch + '`';
+    return L.q[0] + safe(ch) + L.q[1];
   }
 
   function utf8Of(cp) {
@@ -929,7 +947,7 @@
   // `Ã`、`Â` for the given bytes in W, or null when any of them has no visible glyph.
   function glyphRun(W, bytes, sep) {
     const gs = bytes.map((b) => byteGlyph(W, b));
-    return gs.every(Boolean) ? gs.map((g) => '`' + g + '`').join(sep == null ? '、' : sep) : null;
+    return gs.every(Boolean) ? gs.map((g) => '`' + g + '`').join(sep == null ? L.t.listSep : sep) : null;
   }
 
   // UTF-8 lead bytes → what usually lives behind them (for the "fingerprint" note). The
@@ -937,34 +955,21 @@
   // shows C3 as √ — only Windows-1252 turns them into Ð and Ã.
   function leadMeaning(lead, second, W) {
     const west = W === 'windows-1252' || W === 'iso-8859-1';
-    let g;
-    if (lead === 0xc2 || lead === 0xc3) {
-      g = glyphRun(W, [0xc3, 0xc2]);
-      return '它是带音标拉丁字母（é、ü、ñ）与 ©、° 等符号的 UTF-8 前导字节' + (g ? '，满屏 ' + g + ' 基本就是它的指纹' : '');
-    }
-    if (lead >= 0xc4 && lead <= 0xcb) return '它是拉丁扩展字母（如中欧语言的 ł、ő）的 UTF-8 前导字节';
-    if (lead === 0xce || lead === 0xcf) return '它是希腊字母的 UTF-8 前导字节';
-    if (lead === 0xd0 || lead === 0xd1) {
-      g = glyphRun(W, [0xd0, 0xd1]);
-      return '它是西里尔字母（俄文等）的 UTF-8 前导字节' + (g ? '，满屏 ' + g + ' 就是俄文的指纹' : '');
-    }
-    if (lead === 0xd7) return '它是希伯来字母的 UTF-8 前导字节';
-    if (lead >= 0xd8 && lead <= 0xdb) return '它是阿拉伯字母的 UTF-8 前导字节';
-    if (lead === 0xe0) return '它是天城文、泰文等文字的 UTF-8 前导字节';
-    if (lead === 0xe2 && second === 0x80) {
-      g = glyphRun(W, [0xe2, 0x80], '');
-      return '弯引号、破折号、省略号（“ ” ‘ ’ — …）的 UTF-8 都以 `E2 80` 开头' +
-        (g ? '，在 ' + encName(W) + ' 里就是 ' + g + (west ? '——这大概是全世界出镜率最高的乱码' : '') : '');
-    }
-    if (lead === 0xe2) return '它是各类标点与符号（€、™、箭头等）的 UTF-8 前导字节';
-    if (lead === 0xe3) return '它是日文假名与中日韩标点的 UTF-8 前导字节';
-    if (lead >= 0xe4 && lead <= 0xe9) {
-      g = glyphRun(W, [0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9], ' ');
-      return 'E4–E9 是中日韩统一汉字的 UTF-8 前导字节' + (g ? '，看到成片的 ' + g + '，基本可以断定底下埋着汉字' : '');
-    }
-    if (lead >= 0xea && lead <= 0xed) return '它是韩文音节的 UTF-8 前导字节';
-    if (lead === 0xef) return '它是全角字符、BOM 等的 UTF-8 前导字节';
-    if (lead === 0xf0) return '它是 4 字节字符（emoji、生僻汉字）的 UTF-8 前导字节';
+    const M = L.t.lead;
+    if (lead === 0xc2 || lead === 0xc3) return M.latin1(glyphRun(W, [0xc3, 0xc2]));
+    if (lead >= 0xc4 && lead <= 0xcb) return M.latinExt;
+    if (lead === 0xce || lead === 0xcf) return M.greek;
+    if (lead === 0xd0 || lead === 0xd1) return M.cyrillic(glyphRun(W, [0xd0, 0xd1]));
+    if (lead === 0xd7) return M.hebrew;
+    if (lead >= 0xd8 && lead <= 0xdb) return M.arabic;
+    if (lead === 0xe0) return M.indic;
+    if (lead === 0xe2 && second === 0x80) return M.quotes(glyphRun(W, [0xe2, 0x80], ''), encName(W), west);
+    if (lead === 0xe2) return M.symbols;
+    if (lead === 0xe3) return M.kana;
+    if (lead >= 0xe4 && lead <= 0xe9) return M.cjk(glyphRun(W, [0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9], ' '));
+    if (lead >= 0xea && lead <= 0xed) return M.hangul;
+    if (lead === 0xef) return M.fullwidth;
+    if (lead === 0xf0) return M.astral;
     return null;
   }
 
@@ -980,7 +985,7 @@
   }
 
   function encName(id) {
-    if (!id) return '未知编码';
+    if (!id) return L.t.unknownEnc;
     const f = ENCODING_FACTS[id];
     if (f) return f.name;
     const info = codecInfo(id);
@@ -1008,7 +1013,7 @@
   }
 
   function formatByteList(list) {
-    if (!list.length) return '若干不可见字节';
+    if (!list.length) return L.t.someInvisibleBytes;
     const contiguous = list.every((b, i) => i === 0 || b === list[i - 1] + 1);
     if (list.length > 6 && contiguous) return '`' + hex2(list[0]) + '`–`' + hex2(list[list.length - 1]) + '`';
     return list.slice(0, 8).map((b) => '`' + hex2(b) + '`').join(' ');
@@ -1019,36 +1024,34 @@
   // Pair facts with sensible aliasing: iso-8859-1 ≈ windows-1252, ASCII-only
   // originals use the "ascii>" entries, and anything else gets generated facts.
   function pairFactsFor(E, W, original) {
+    const P = L.PAIR_FACTS;
     const key = E + '>' + W;
-    if (PAIR_FACTS[key]) return { key, facts: PAIR_FACTS[key], generic: false };
+    if (P[key]) return { key, facts: P[key], generic: false };
     const aliases = [];
     if (W === 'iso-8859-1') aliases.push(E + '>windows-1252');
     if (W === 'windows-1252') aliases.push(E + '>iso-8859-1');
     if (original != null && isAsciiText(original)) aliases.push('ascii>' + W);
-    for (const k of aliases) if (PAIR_FACTS[k]) return { key, facts: PAIR_FACTS[k], generic: false };
+    for (const k of aliases) if (P[k]) return { key, facts: P[k], generic: false };
     return { key, facts: genericPair(E, W), generic: true };
   }
 
   function genericPair(E, W) {
-    const e = ENCODING_FACTS[E];
-    const w = ENCODING_FACTS[W];
+    const e = L.ENCODING_FACTS[E];
+    const w = L.ENCODING_FACTS[W];
     const eName = encName(E);
     const wName = encName(W);
+    const G = L.t.generic;
     const tips = [];
-    if (W === 'utf-8') {
-      tips.push('这类伤通常不可逆：`�` 替换发生时原字节已被丢弃，请回到源头用 ' + eName + ' 重新读取原始文件。');
-    }
-    if (e && w && W !== 'utf-8') tips.push("急救：`s.encode('" + w.py + "').decode('" + e.py + "')`。");
-    if (e) tips.push('统一转成 UTF-8：`iconv -f ' + e.iconv + ' -t UTF-8`。');
-    tips.push('文件、数据库、网页与终端统一使用 UTF-8，并且每一处都显式声明编码。');
+    if (W === 'utf-8') tips.push(G.tipUtf8(eName));
+    if (e && w && W !== 'utf-8') tips.push(G.tipRescue(w.py, e.py));
+    if (e) tips.push(G.tipIconv(e.iconv));
+    tips.push(L.t.allUtf8Tip);
     const both = e && w;
     return {
       era: both ? [Math.max(e.born, w.born), null] : null,
-      eraWhy: both
-        ? eName + ' 诞生于' + (/^\d/.test(e.bornLabel) ? ' ' : '') + e.bornLabel + '，' + wName + ' 诞生于' + (/^\d/.test(w.bornLabel) ? ' ' : '') + w.bornLabel + '，这种误读只可能发生在两者都已登场之后'
-        : '这是一种本馆尚未收录的编码组合，暂时无法给出可靠的年代',
-      sites: ['一个用 ' + eName + ' 写下文字、却被当作 ' + wName + ' 打开的文件', '一套在 ' + eName + ' 与 ' + wName + ' 之间转手、却没人声明编码的系统'],
-      culprits: ['缺失或错误的编码声明', '默认按 ' + wName + ' 解读文本的软件'],
+      eraWhy: both ? G.eraWhy(eName, e.bornLabel, wName, w.bornLabel) : G.eraWhyUnknown,
+      sites: G.sites(eName, wName),
+      culprits: G.culprits(wName),
       tips,
     };
   }
@@ -1459,16 +1462,16 @@
 
   function trueDesc(c, layer) {
     const E = encName(layer.E);
-    if (TRUE_DESC_BY_ID[layer.E]) return fill(TRUE_DESC_BY_ID[layer.E], { E }, c.strict);
+    if (L.TRUE_DESC_BY_ID[layer.E]) return fill(L.TRUE_DESC_BY_ID[layer.E], { E }, c.strict);
     const type = encType(layer.E);
     if (type === 'utf8') {
       const text = layer.after || c.output;
       const two = [];
       const three = [];
-      for (const s of UTF8_SCRIPTS) if (s.re.test(text)) (s.len === 2 ? two : three).push(s.name);
-      return fill(TRUE_DESC.utf8, { E, two: two.map((x) => '、' + x).join(''), three: three.map((x) => '、' + x).join('') }, c.strict);
+      UTF8_SCRIPTS.forEach((s, i) => { if (s.re.test(text)) (s.len === 2 ? two : three).push(L.UTF8_SCRIPT_NAMES[i]); });
+      return fill(L.TRUE_DESC.utf8, { E, two: L.t.utf8Extra(two), three: L.t.utf8Extra(three) }, c.strict);
     }
-    return fill(TRUE_DESC[type] || TRUE_DESC.single, { E }, c.strict);
+    return fill(L.TRUE_DESC[type] || L.TRUE_DESC.single, { E }, c.strict);
   }
 
   /* ======================================================================
@@ -1576,20 +1579,27 @@
     return runs.filter((r) => r.before);
   }
 
+  // Text that came from another module (engine labels, signal hints, language names) is only used
+  // when it is in the narration's language; a pack may veto it (en-US rejects CJK prose).
+  const foreignOk = (s) => !L.t.foreignOk || L.t.foreignOk(String(s));
+
   function langNameOf(r, best) {
-    if (best && best.lang && LANG_NAMES[best.lang.lang]) return LANG_NAMES[best.lang.lang];
-    if (best && best.lang && best.lang.name) return safe(best.lang.name);
+    const N = L.LANG_NAMES;
+    const F = L.t.langFallback;
+    if (best && best.lang && N[best.lang.lang]) return N[best.lang.lang];
+    if (best && best.lang && best.lang.name && foreignOk(best.lang.name)) return safe(best.lang.name);
     const sc = r.inputScore;
-    if (sc && LANG_NAMES[sc.lang]) return LANG_NAMES[sc.lang];
+    if (sc && N[sc.lang]) return N[sc.lang];
     try {
       if (MBX.Scorer && typeof MBX.Scorer.detectLang === 'function') {
-        const d = MBX.Scorer.detectLang(r.input);
-        if (d && d.name) return safe(d.name);
+        const d = L === ZH ? MBX.Scorer.detectLang(r.input) : MBX.Scorer.detectLang(r.input, { locale: L.locale });
+        if (d && L !== ZH && N[d.lang]) return N[d.lang];
+        if (d && d.name && foreignOk(d.name)) return safe(d.name);
       }
     } catch (_) { /* scorer optional here */ }
-    if (/[\u4e00-\u9fff]/.test(r.input)) return '中文';
-    if (isAsciiText(r.input)) return '英语';
-    return '文本';
+    if (/[\u4e00-\u9fff]/.test(r.input)) return F.han;
+    if (isAsciiText(r.input)) return F.ascii;
+    return F.other;
   }
 
   function seedValue(seed) {
@@ -1618,23 +1628,25 @@
       sigMap.get(s.id).count++;
     }
     const signatures = Array.from(sigMap.values()).map(({ sig, count }) => {
-      const fact = SIGNATURE_FACTS[sig.id] || null;
+      const fact = L.SIGNATURE_FACTS[sig.id] || null;
+      const base = SIGNATURE_FACTS[sig.id] || null; // counting is language-neutral: use the relic's own glyphs
       let occurrences = Math.max(count, sig.match ? countMatches(input, sig.match) : 0);
       // The engine may report one match spanning a whole run ("锟斤拷锟斤拷锟斤拷"): count the
       // signature itself when it literally appears, or the runs of its glyph.
-      if (fact && fact.title && input.indexOf(fact.title) >= 0) occurrences = countMatches(input, fact.title);
-      else if (fact && fact.glyph && input.indexOf(fact.glyph + fact.glyph) >= 0) {
-        occurrences = (input.match(new RegExp(fact.glyph + '{2,}', 'g')) || []).length;
+      if (base && base.title && input.indexOf(base.title) >= 0) occurrences = countMatches(input, base.title);
+      else if (base && base.glyph && input.indexOf(base.glyph + base.glyph) >= 0) {
+        occurrences = (input.match(new RegExp(base.glyph + '{2,}', 'g')) || []).length;
       }
-      return { id: sig.id, sig, fact, count: occurrences || 1, title: safe(fact ? fact.title : sig.title || sig.id) };
+      const raw = fact ? fact.title : sig.title && foreignOk(sig.title) ? sig.title : sig.id;
+      return { id: sig.id, sig, fact, count: occurrences || 1, title: safe(raw || sig.id) };
     });
 
     let repairs = best && Array.isArray(best.repairs) ? best.repairs.filter(Boolean) : [];
     if (!repairs.length) for (const st of steps) repairs = repairs.concat(st.repairs);
 
-    const voice = VOICES[style];
+    const voice = L.VOICES[style];
     const keyBase = input + '\u241f' + style + '\u241f' + seed;
-    const styleInfo = STYLES.find((s) => s.id === style);
+    const styleInfo = L.STYLES.find((s) => s.id === style);
     const docentIdx = (fnv1a(input + style) + seed) % styleInfo.docents.length;
 
     const c = {
@@ -1652,7 +1664,7 @@
     };
     c.lang = langNameOf(r, best);
     c.langCode = best && best.lang && best.lang.lang ? best.lang.lang : r.inputScore && r.inputScore.lang ? r.inputScore.lang : null;
-    c.langText = /文本$/.test(c.lang) ? c.lang : c.lang + (/[A-Za-z0-9]$/.test(c.lang) ? ' 文本' : '文本');
+    c.langText = L.t.langText(c.lang);
     c.transcodes = layers.filter((l) => l.kind === 'transcode');
     c.escapeOnly = !c.transcodes.length && layers.length > 0;
     c.deepE = layers.length ? layers[0].E : null;
@@ -1703,17 +1715,17 @@
   function computeAnalogy(c) {
     const top = c.transcodes.length ? c.transcodes[c.transcodes.length - 1] : null;
     if (!top) return null;
-    const L1 = LANG_SHORT[c.langCode];
+    const L1 = L.LANG_SHORT[c.langCode];
     const f = ENCODING_FACTS[top.W];
-    const L2 = f ? REGION_SPEECH[f.region] : null;
-    if (!L1 || !L2 || L1.charAt(0) === L2.charAt(0)) return null;
+    const L2 = f ? L.REGION_SPEECH[f.region] : null;
+    if (!L1 || !L2 || L.t.sameLang(L1, L2)) return null;
     return { L1, L2 };
   }
 
   function fragsText(c, n) {
     const frags = c.part ? c.part.frags : [];
     const list = frags.slice(0, n || 2).map((f) => quote(f.before, 16));
-    return list.join('、') + (frags.length > (n || 2) ? ' 等 ' + frags.length + ' 段' : '');
+    return L.t.frags(list, frags.length, n || 2);
   }
 
   function computeFlags(c) {
@@ -1905,22 +1917,15 @@
 
   /* ---------- dating ("字节测年法") ---------- */
 
-  const eraSpan = (start, end) => (end == null ? start + ' 年至今' : start + '–' + end + ' 年');
-
-  function eraLabel(start, end) {
-    if (start == null) return '年代不详';
-    if (end == null) return '约 ' + start + ' 年至今';
-    if (end <= start) return '约 ' + start + ' 年前后';
-    return '约 ' + start + '–' + end + ' 年';
-  }
+  const eraSpan = (start, end) => L.t.eraSpan(start, end);
+  const eraLabel = (start, end) => L.t.eraLabel(start, end);
 
   function computeEra(c) {
     const ev = [];
+    const X = L.t.era;
     if (c.status === 'clean') {
-      ev.push(isAsciiText(c.input)
-        ? 'ASCII（1963）至今通用，单凭字节无法断代。'
-        : '它的字节在今天主流的 UTF-8 环境下一切正常，没有任何"地层"可供测年。');
-      return { start: null, end: null, label: '当代（无需测年）', evidence: ev };
+      ev.push(isAsciiText(c.input) ? X.cleanAscii : X.cleanOther);
+      return { start: null, end: null, label: X.cleanLabel, evidence: ev };
     }
 
     let start = null;
@@ -1942,8 +1947,8 @@
       bound(f.era);
       const l = c.transcodes[i];
       const tag = encName(l.E) + '→' + encName(l.W);
-      if (f.era) ev.push(tag + ' 型乱码的高发期大约在 ' + eraSpan(f.era[0], f.era[1]) + '。' + f.eraWhy + '。');
-      else ev.push(f.eraWhy + '。');
+      if (f.era) ev.push(X.pair(tag, eraSpan(f.era[0], f.era[1]), f.eraWhy));
+      else ev.push(X.pairNoEra(f.eraWhy));
     });
 
     const seenWhy = new Set(c.pairs.map((p) => p.facts.eraWhy));
@@ -1954,12 +1959,12 @@
       if (f.eraLabel && !c.pairs.length) override = f.eraLabel;
       if (seenWhy.has(f.eraWhy)) continue; // UTF-16 BOM and NUL signatures share one story
       seenWhy.add(f.eraWhy);
-      ev.push('就名器「' + f.title + '」而言，' + f.eraWhy + '。');
+      ev.push(X.sig(f.title, f.eraWhy));
     }
     if (c.escapeOnly && c.deepE && ENCODING_FACTS[c.deepE] && SCHEMES[c.layers[0].scheme] && SCHEMES[c.layers[0].scheme].byte) {
-      const e = ENCODING_FACTS[c.deepE];
+      const e = L.ENCODING_FACTS[c.deepE];
       bound([e.born, null]);
-      ev.push('转义里包着的是 ' + e.name + ' 字节，而 ' + e.name + ' 诞生于' + (/^\d/.test(e.bornLabel) ? ' ' : '') + e.bornLabel + '，所以它不会早于这个年代。');
+      ev.push(X.escape(e.name, e.bornLabel));
     }
 
     const floor = (year, text) => {
@@ -1967,44 +1972,37 @@
       if (start == null || start < year) start = year;
     };
     if (c.flags.emoji) {
-      floor(2010, '原文里出现了 emoji' + showChar(c.flags.emoji) + '——Unicode 6.0（2010）才大批收录 emoji，所以它不会早于 2010 年。');
+      floor(2010, X.emoji(showChar(c.flags.emoji)));
       if (c.transcodes.some((l) => l.E === 'utf-8' && (l.W === 'windows-1252' || l.W === 'iso-8859-1'))) {
-        ev.push('而且 emoji 是 4 字节 UTF-8，MySQL 直到 5.5.3（2010）才有能存它的 utf8mb4。');
+        ev.push(X.emojiMysql);
       }
     }
-    if (c.flags.euro) floor(1998, '原文含有欧元符号 €，它在 1998 年前后才进入 Unicode 与 Windows-1252（0x80），因此年代不早于 1998 年。');
-    if (c.flags.garbledEuro) floor(1998, '乱码里出现了 `€`——说明误读它的是 1998 年之后、已在 0x80 放进欧元符号的 Windows-1252。');
+    if (c.flags.euro) floor(1998, X.euro);
+    if (c.flags.garbledEuro) floor(1998, X.garbledEuro);
     const curated = (pred) => c.pairs.some((p, i) => !p.generic && pred(c.transcodes[i]));
     if (c.flags.koi8 && !curated((l) => l.E === 'koi8-r' || l.W === 'koi8-r')) {
-      ev.push('KOI8-R 是上世纪 90 年代俄语 Unix、Usenet 与电子邮件的通用编码（RFC 1489，1993）。');
+      ev.push(X.koi8);
     }
     if (c.flags.crossStrait && !curated((l) => /^(big5|gbk)$/.test(l.E) && /^(big5|gbk)$/.test(l.W))) {
-      ev.push('简繁两种编码互相误读，是 1990–2000 年代两岸 BBS 与电子邮件往来时的常见事故。');
+      ev.push(X.crossStrait);
     }
     if (c.flags.zip) {
       const zipLayer = c.transcodes.find((l) => l.W === 'cp437');
       const box = cps(zipLayer.before).find((ch) => /[\u2500-\u259f]/.test(ch));
-      ev.push(box
-        ? '文字里冒出了 DOS 制表符' + showGlyph(box) + '——CP437 的这类字形出现在文件名里，几乎就是 ZIP 压缩包的指纹。'
-        : 'CP437 出现在误读链路里，几乎就是 ZIP 文件名的指纹。');
+      ev.push(box ? X.zipBox(showGlyph(box)) : X.zip);
     }
     for (const sch of c.flags.schemes) {
-      if (sch === 'percent') ev.push('外层的百分号编码说明它曾在网址或表单参数里旅行——2005 年的 RFC 3986 建议非 ASCII 字符先转 UTF-8 再做百分号编码。');
-      else if (sch === 'quoted-printable') ev.push('Quoted-Printable 是 MIME 电子邮件（1992 年起）的传输编码，说明它曾在邮件里旅行。');
-      else if (sch === 'html-entity') ev.push('它被包在 HTML 字符实体里，说明曾栖身于网页源码。');
-      else if (sch === 'unicode-escape') ev.push('`\\u` 转义说明它曾躺在 JSON、JavaScript 或 Java 源码里。');
-      else if (sch === 'hex-escape') ev.push('`\\x` 转义多见于程序日志、调试输出和 Python/C 源码，说明它曾以字节串的形式被原样打印出来。');
-      else if (sch === 'hex-dump') ev.push('十六进制转储是调试与取证时查看原始字节的常用形式，说明有人曾直接盯着它的字节看。');
+      if (X.scheme[sch]) ev.push(X.scheme[sch]);
     }
     if (c.flags.multi && start != null) {
       const extra = 2 * (c.transcodes.length - 1);
-      ev.push('它被误读了 ' + c.transcodes.length + ' 次，说明至少经历了 ' + c.transcodes.length + ' 次迁移或转存（比如导出、导入、再导出），起始年份相应推后约 ' + extra + ' 年。');
+      ev.push(X.multi(c.transcodes.length, extra));
       start += extra;
     }
     if (!open && end != null && start != null && end < start) end = start + 2; // conflicting evidence: trust the floors
     if (open) end = null;
     if (start == null && !ev.length) {
-      ev.push(c.layers.length ? '这条链路本身不带年代信息，字节测年无从下手。' : '没有找到可信的编码链路，字节测年无从下手。');
+      ev.push(c.layers.length ? X.noneChain : X.noneAtAll);
     }
     const label = override || eraLabel(start, end);
     return { start, end, label, evidence: ev };
@@ -2012,25 +2010,24 @@
 
   function computeSite(c) {
     const rng = c.siteRng;
-    if (c.status === 'clean') return '无需发掘——它一直好好地待在地表';
+    const S = L.t.site;
+    if (c.status === 'clean') return S.clean;
     let site = null;
     if (c.pairs.length) {
       const deep = c.pairs[0];
       site = rng.pick(deep.facts.sites);
       const top = c.pairs[c.pairs.length - 1];
       if (c.pairs.length > 1) {
-        site += top.key === deep.key
-          ? '，并在之后的一次数据迁移或导入导出中被再次误读'
-          : '，后又辗转流入' + rng.pick(top.facts.sites);
+        site += top.key === deep.key ? S.again : S.then(rng.pick(top.facts.sites));
       }
     } else if (c.signatures.length && c.signatures[0].fact) {
       site = c.signatures[0].fact.site;
     }
     const outer = c.layers.length ? c.layers[c.layers.length - 1] : null;
     if (outer && outer.kind === 'unescape' && SCHEMES[outer.scheme]) {
-      site = site ? site + '，最后被封装进' + SCHEMES[outer.scheme].habitat : SCHEMES[outer.scheme].habitat;
+      site = S.wrapped(site, L.SCHEMES[outer.scheme].habitat);
     }
-    if (!site) site = c.status === 'unknown' ? '出土地点不明' : '某次没有留下记录的有损转换现场';
+    if (!site) site = c.status === 'unknown' ? S.unknown : S.lost;
     return safe(site);
   }
 
@@ -2056,30 +2053,24 @@
   function memVars(c) {
     const sigs = c.signatures.filter((s) => s.fact && s.fact.kind === 'debug-memory');
     const uniq = (a) => a.filter((x, i) => a.indexOf(x) === i);
-    return {
-      mem: uniq(sigs.map((s) => s.fact.memory)).join('和') || '未初始化的内存',
-      fill: uniq(sigs.map((s) => '`' + s.fact.fillByte + '`')).join('、'),
-      glyph: uniq(sigs.map((s) => '「' + s.fact.glyph + '」')).join(''),
-      detail: sigs.length ? '文物上共检出' + sigs.map((s) => '名器「' + s.title + '」' + s.count + ' 处').join('、') + '。' : '',
-    };
+    return L.t.memVars(sigs, uniq);
   }
 
   function confText(c) {
-    return c.confidence == null ? '（尚未评估）' : '**' + Math.round(c.confidence * 100) + '%**';
+    return c.confidence == null ? L.t.confNone : '**' + Math.round(c.confidence * 100) + '%**';
   }
 
   function chainPath(c) {
-    if (!c.layers.length) return '链路不明';
+    const C = L.t.chain;
+    if (!c.layers.length) return C.none;
     return c.layers.map((l, i) => {
       if (l.kind === 'unescape') {
-        const sch = SCHEMES[l.scheme] ? SCHEMES[l.scheme].name : '某种转义';
-        const sp = /^[A-Za-z0-9\\]/.test(sch) ? ' ' : '';
-        if (i === 0) return (SCHEMES[l.scheme] && !SCHEMES[l.scheme].byte ? '文字' : '`' + encName(l.E) + '` 字节') + '被写成了' + sp + sch;
-        return '最后又被写成了' + sp + sch;
+        const sch = L.SCHEMES[l.scheme] ? L.SCHEMES[l.scheme].name : C.someEscape;
+        const textOnly = !!(SCHEMES[l.scheme] && !SCHEMES[l.scheme].byte);
+        return C.escape(i, sch, textOnly, textOnly ? null : encName(l.E));
       }
-      if (i === 0) return '原本以 `' + encName(l.E) + '` 编码的文字被 `' + encName(l.W) + '` 误读';
-      return '又按 `' + encName(l.E) + '` 编码后被 `' + encName(l.W) + '` 误读';
-    }).join('，');
+      return i === 0 ? C.first(encName(l.E), encName(l.W)) : C.next(encName(l.E), encName(l.W));
+    }).join(C.join);
   }
 
   // The deepest layer's encoding name. Code-point escapes (\u, &#…;) wrap characters rather than
@@ -2093,26 +2084,24 @@
   }
 
   function buildTitle(c) {
-    if (c.status === 'clean') return '『现代真品 · ' + c.lang + '』';
-    if (c.status === 'unknown') return '『未定名文物 · 来历待考』';
-    if (c.debugMemory) return '『' + c.signatures[0].title + ' · 名器 · 调试内存』';
+    const T = L.t.title;
+    if (c.status === 'clean') return T.clean(c.lang);
+    if (c.status === 'unknown') return T.unknown;
+    if (c.debugMemory) return T.debug(c.signatures[0].title);
     if (!c.layers.length) {
-      return c.signatures.length ? '『' + c.signatures[0].title + ' · 名器 · 不可逆』' : '『无名残片 · 不可逆』';
+      return c.signatures.length ? T.sigLost(c.signatures[0].title) : T.nameless;
     }
-    const parts = [originName(c)];
     const kinds = [];
     for (const l of c.transcodes) {
-      const f = ENCODING_FACTS[l.W];
+      const f = L.ENCODING_FACTS[l.W];
       const k = f ? f.misread : encName(l.W);
       if (kinds.indexOf(k) < 0) kinds.push(k);
     }
-    const joined = kinds.join('/');
-    if (kinds.length) parts.push(joined + (/[A-Za-z0-9]$/.test(joined) ? ' ' : '') + '误读型');
-    const sch = c.layers.filter((l) => l.kind === 'unescape').map((l) => (SCHEMES[l.scheme] ? SCHEMES[l.scheme].short : '转义封装'));
-    if (sch.length) parts.push(sch.join('/') + (kinds.length ? '' : '型'));
-    if (c.status === 'irrecoverable') parts.push('不可逆');
-    else parts.push(layerWord(c.layers.length) + '地层' + (c.status === 'partial' ? (c.part && c.part.clean ? ' · 局部误读' : ' · 残件') : ''));
-    return '『' + parts.join(' · ') + '』';
+    const schemes = c.layers.filter((l) => l.kind === 'unescape').map((l) => (L.SCHEMES[l.scheme] ? L.SCHEMES[l.scheme].short : T.escapeWrap));
+    return T.layers({
+      origin: originName(c), kinds, schemes, layers: c.layers.length,
+      irrecoverable: c.status === 'irrecoverable', partial: c.status === 'partial', partialClean: !!(c.part && c.part.clean),
+    });
   }
 
   // Escape-only relics were wrapped, not mis-read, so they get their own subtitles.
@@ -2128,22 +2117,21 @@
     const vars = {
       E: originName(c, top && top.E),
       W: top ? encName(top.W) : encName(c.layers.length ? c.layers[0].E : null),
-      S: outer && SCHEMES[outer.scheme] ? SCHEMES[outer.scheme].name : '转义',
+      S: outer && L.SCHEMES[outer.scheme] ? L.SCHEMES[outer.scheme].name : L.t.escapeWord,
     };
-    if (/^[A-Za-z\\]/.test(vars.S)) vars.S = ' ' + vars.S; // space a Latin-initial name off from the Chinese before it
+    vars.S = L.t.subtitleS(vars.S); // zh: space a Latin-initial name off from the Chinese before it
     Object.assign(vars, memVars(c), { progress: progressText(c) });
     const group = voiceGroup(c, c.voice.subtitle);
-    const list = c.status === 'restored' && !top && outer ? ESCAPE_SUBTITLES[c.style] : c.voice.subtitle[group];
+    const list = c.status === 'restored' && !top && outer ? L.ESCAPE_SUBTITLES[c.style] : c.voice.subtitle[group];
     let s = stripMarkup(T(c, list, vars, 'subtitle')).replace(/\s+/g, ' ').trim();
-    if (c.signatures.length && c.status !== 'restored') s = '名器「' + c.signatures[0].title + '」 · ' + s;
+    if (c.signatures.length && c.status !== 'restored') s = L.t.subtitleSig(c.signatures[0].title, s);
     return s;
   }
 
   // "修复进度" from the share of the text that really was misread and restored.
   function progressText(c) {
-    if (!c.part || !c.part.total) return '部分完成';
-    const pct = Math.round((c.part.changedN / c.part.total) * 100);
-    return pct > 0 ? '约 ' + pct + '% 的文字经过还原' : '部分完成';
+    if (!c.part || !c.part.total) return L.t.progress(0);
+    return L.t.progress(Math.round((c.part.changedN / c.part.total) * 100));
   }
 
   function buildOpening(c) {
@@ -2155,21 +2143,21 @@
   }
 
   function fixedNote(c) {
+    const X = L.t.fixed;
     if (c.part && c.part.frags.length) {
-      const frags = c.part.frags.slice(0, 2).map((f) => quote(f.before, 16) + (f.after ? '被还原成了' + quote(f.after, 16) : '得到了还原'));
-      return '乱码片段' + frags.join('、') + (c.part.frags.length > 2 ? '，另有 ' + (c.part.frags.length - 2) + ' 段同样处理' : '');
+      const frags = c.part.frags.slice(0, 2).map((f) => X.frag(quote(f.before, 16), f.after ? quote(f.after, 16) : null));
+      return X.frags(frags, c.part.frags.length - 2);
     }
     const surface = c.layers.length ? c.layers[c.layers.length - 1] : null;
     const deep = c.layers.length ? c.layers[0] : null;
     if (surface && deep && surface.before && surface.before !== c.input) {
-      return quote(surface.before, 16) + '被还原成了' + quote(deep.after, 16);
+      return X.whole(quote(surface.before, 16), quote(deep.after, 16));
     }
     return null;
   }
 
   function partNote(c) {
-    const fixed = fixedNote(c);
-    return fixed ? '其中' + fixed + '，其余部分保持原样' : '只有部分片段找到了可信的还原链路，其余部分保持原样';
+    return L.t.partNote(fixedNote(c));
   }
 
   // "第 5 个字" / "第 5、9 个字" for the characters a repair had to guess.
@@ -2177,26 +2165,34 @@
     const pos = [];
     for (const rep of c.repairs) if (isNum(rep.index) && rep.index >= 0 && pos.indexOf(rep.index + 1) < 0) pos.push(rep.index + 1);
     pos.sort((a, b) => a - b);
-    if (!pos.length) return c.repairs.length + ' 处字符';
-    return '第 ' + pos.slice(0, 4).join('、') + (pos.length > 4 ? ' 等' : '') + ' 个字';
+    return L.t.positions(pos, c.repairs.length);
   }
 
   function lossDetail(c) {
+    const X = L.t.loss;
     const bits = [];
-    if (c.flags.nFFFD) bits.push(c.flags.nFFFD + ' 个替换字符 `�`');
-    if (c.flags.nQ >= 3) bits.push(c.flags.nQ + ' 个问号 `?`');
+    if (c.flags.nFFFD) bits.push(X.fffd(c.flags.nFFFD));
+    if (c.flags.nQ >= 3) bits.push(X.q(c.flags.nQ));
     for (const s of c.signatures) {
       if (s.id === 'replacement' || s.id === 'question-marks') continue;
-      bits.push('名器「' + s.title + '」' + s.count + ' 处');
+      bits.push(X.sig(s.title, s.count));
     }
     let reason = '';
     const withNote = c.signatures.find((s) => s.fact && s.fact.lossNote);
     if (withNote) reason = withNote.fact.lossNote;
-    else if (c.flags.nFFFD) reason = '替换字符出现的那一刻，原字节就被丢弃了。';
-    else if (c.flags.nQ >= 3) reason = '问号是编码器在"装不下"时顶替原字符留下的。';
-    else reason = '关键字节在某次有损转换中丢失了。';
-    const lead = bits.length && /^\d/.test(bits[0]) ? ' ' : '';
-    return (bits.length ? '文物上共检出' + lead + bits.join('、') + '。' : '') + reason;
+    else if (c.flags.nFFFD) reason = X.reasonFFFD;
+    else if (c.flags.nQ >= 3) reason = X.reasonQ;
+    else reason = X.reasonOther;
+    return X.detail(bits, reason);
+  }
+
+  // A clue's description: the engine's hint when it speaks the narration's language, else the
+  // pack's own wording for that signal type.
+  function hintOf(s) {
+    const h = s.hint || '';
+    if (h && foreignOk(h)) return h;
+    const own = L.SIGNAL_HINTS && s.type ? L.SIGNAL_HINTS[s.type] : null;
+    return own || (h && !L.SIGNAL_HINTS ? h : s.type || '');
   }
 
   // Signals grouped by clue: each distinct hint once, with up to `max` distinct matches.
@@ -2204,7 +2200,7 @@
     const groups = [];
     const byHint = new Map();
     for (const s of c.signals) {
-      const hint = safe(s.hint || s.type || '');
+      const hint = safe(L === ZH ? s.hint || s.type || '' : hintOf(s));
       if (!hint) continue;
       let g = byHint.get(hint);
       if (!g) { g = { hint, matches: [] }; byHint.set(hint, g); groups.push(g); }
@@ -2215,8 +2211,8 @@
   }
 
   function signalNote(c) {
-    const items = groupedSignals(c, 2).slice(0, 2).map((g) => g.hint + (g.matches.length ? '（如 ' + g.matches.map(showGlyphRun).join('、') + '）' : ''));
-    return items.length ? '检出的可疑特征：' + items.join('；') + '。' : '它没有表现出典型的乱码特征。';
+    const items = groupedSignals(c, 2).slice(0, 2).map((g) => L.t.signalItem(g.hint, g.matches.map(showGlyphRun)));
+    return L.t.signalNote(items);
   }
 
   // A matched fragment as inline code; invisible characters (C1 controls, NUL…) are spelled out
@@ -2228,9 +2224,20 @@
     if (chars.length && chars.every(invisible)) return chars.map((ch) => '`' + uplus(ch.codePointAt(0)) + '`').join(' ');
     if (/[`*]/.test(t) || chars.some(invisible)) {
       const inv = chars.filter(invisible).map((ch) => '`' + uplus(ch.codePointAt(0)) + '`');
-      return quote(t, 8) + '（含 ' + inv.filter((x, i) => inv.indexOf(x) === i).slice(0, 2).join('、') + '）';
+      return L.t.glyphRunInv(quote(t, 8), inv.filter((x, i) => inv.indexOf(x) === i).slice(0, 2));
     }
     return '`' + t + '`';
+  }
+
+  // A hypothesis label in the narration's language: the engine's own label when it fits, else one
+  // the pack spells out from the hypothesis' steps (so en-US never depends on engine label text).
+  function labelOf(h, fallback) {
+    if (h && h.label && (L === ZH || foreignOk(h.label))) return String(h.label);
+    if (L !== ZH && h && Array.isArray(h.steps) && h.steps.length && L.t.ownLabel) {
+      const own = L.t.ownLabel(h.steps.filter(Boolean).map(prepStep), Array.isArray(h.repairs) ? h.repairs.length : 0, encName, L.SCHEMES);
+      if (own) return own;
+    }
+    return h && h.label && L === ZH ? String(h.label) : fallback;
   }
 
   function altVars(c) {
@@ -2238,13 +2245,14 @@
     if (!a) return null;
     return {
       altOutput: quote(a.output, 20),
-      altLabel: safe(a.label || '另一条链路'),
-      altConf: isNum(a.confidence) ? '置信度 ' + Math.round(a.confidence * 100) + '%' : '置信度未评估',
+      altLabel: safe(L === ZH ? a.label || L.t.altLabelDefault : labelOf(a, L.t.altLabelDefault)),
+      altConf: L.t.altConf(isNum(a.confidence) ? Math.round(a.confidence * 100) : null),
     };
   }
 
   function buildIdentify(c) {
     const v = c.voice;
+    const X = L.t.id;
     const rng = c.rng('identify');
     const av = altVars(c);
     const vars = Object.assign(memVars(c), {
@@ -2255,28 +2263,28 @@
       conf: confText(c),
       depth: c.layers.length,
       partNote: partNote(c),
-      fixedNote: fixedNote(c) || '我们抢救出了其中一部分片段',
-      frags: fragsText(c, 2) || '乱码片段',
+      fixedNote: fixedNote(c) || X.fixedDefault,
+      frags: fragsText(c, 2) || X.fragsDefault,
       keptN: c.part ? c.part.keptN : 0,
       lossDetail: lossDetail(c),
-      outputNote: c.output && c.output !== c.input && !/^[�\s]*$/.test(c.output) ? '目前能勉强读出的是' + quote(c.output, 30) + '。' : '',
+      outputNote: c.output && c.output !== c.input && !/^[�\s]*$/.test(c.output) ? X.outputNote(quote(c.output, 30)) : '',
       signalNote: signalNote(c),
-      altNote: av ? '最接近的猜测是' + av.altOutput + '（' + av.altLabel + '），但' + av.altConf + '。' : '',
+      altNote: av ? X.altNote(av.altOutput, av.altLabel, av.altConf) : '',
     });
     const parts = [fill(rng.pick(usable(v.identify[voiceGroup(c, v.identify)], c)), vars, c.strict)];
     // Inferred characters are never presented as plain restoration.
     if ((c.status === 'restored' || c.status === 'partial') && c.repairs.length) {
-      parts.push('其中' + repairedPositions(c) + '是根据残存字节推断补全的，并非原样还原。');
+      parts.push(X.inferred(repairedPositions(c), c.repairs.length));
     }
     if ((c.status === 'restored' || c.status === 'partial') && av && c.confidence != null && c.confidence < 0.6 && altWorthMentioning(c)) {
       parts.push(fill(rng.pick(v.lowConfidence), av, c.strict));
     }
     if (c.signatures.length && c.status !== 'irrecoverable' && !c.debugMemory) {
       const family = c.signatures.every((s) => s.fact && s.fact.family);
-      const sigTitle = family ? c.signatures.map((s) => '「' + s.title + '」').join('、') : c.signatures.map((s) => s.title).join('、');
+      const sigTitle = X.sigTitles(c.signatures.map((s) => s.title), family);
       parts.push(fill(rng.pick(usable(family ? v.sigMentionFamily : v.sigMention, c)), { sigTitle }, c.strict));
     }
-    return parts.join('');
+    return parts.join(L.t.sp);
   }
 
   // A competing reading is worth a sentence only when it is not hopeless next to the winner.
@@ -2293,51 +2301,53 @@
   }
 
   function pieceMap(t) {
+    const P = L.t.piece;
     return t.pieces.map((p) => {
       let s = '`' + p.hex + '`→' + showGlyph(p.ch);
-      if (p.cross === 'next') s += '（`' + p.borrowHex + '` 借自下一个字' + (p.neighbor ? showChar(p.neighbor) : '') + '）';
-      else if (p.cross === 'prev') s += '（`' + p.borrowHex + '` 来自上一个字' + (p.neighbor ? showChar(p.neighbor) : '') + '）';
-      else if (p.error) s += '（凑不成合法字符）';
+      if (p.cross === 'next') s += P.next(p.borrowHex, p.neighbor ? showChar(p.neighbor) : '');
+      else if (p.cross === 'prev') s += P.prev(p.borrowHex, p.neighbor ? showChar(p.neighbor) : '');
+      else if (p.error) s += P.error;
       return s;
-    }).join('、');
+    }).join(P.sep);
   }
 
   function actionFor(c, layer, t) {
+    const A = L.t.act;
     const type = encKnown(layer.W) ? encType(layer.W) : 'unknown';
     const crossing = t.pieces.some((p) => p.cross);
-    if (!t.pieces.length) return '读成了别的样子';
-    if (type === 'unknown') return c.style === 'academic' ? pieceMap(t) : '读成了 ' + pieceMap(t);
+    if (!t.pieces.length) return A.none;
+    if (type === 'unknown') return c.style === 'academic' ? pieceMap(t) : A.unknown(pieceMap(t));
     if (type === 'single' && !crossing) {
-      return c.style === 'academic' ? pieceMap(t) : '逐字节读成了 ' + glyphList(t);
+      return c.style === 'academic' ? pieceMap(t) : A.single(glyphList(t));
     }
-    if (type === 'utf16') return c.style === 'academic' ? pieceMap(t) : '两个字节一组拼成了 ' + pieceMap(t);
-    if (type === 'utf8') return c.style === 'academic' ? pieceMap(t) : '解出了 ' + pieceMap(t);
-    return c.style === 'academic' ? pieceMap(t) : '分组读成了 ' + pieceMap(t);
+    if (type === 'utf16') return c.style === 'academic' ? pieceMap(t) : A.utf16(pieceMap(t));
+    if (type === 'utf8') return c.style === 'academic' ? pieceMap(t) : A.utf8(pieceMap(t));
+    return c.style === 'academic' ? pieceMap(t) : A.double(pieceMap(t));
   }
 
   function traceSentence(c, layer, t, li, rng, first) {
     const v = c.voice;
-    const hexTxt = t.hex + (t.repaired && t.fullHex && t.fullHex !== t.hex ? '（完整应为 ' + t.fullHex + '，缺失的字节由修复推断）' : '');
+    const X = L.t.trace;
+    const hexTxt = t.repaired && t.fullHex && t.fullHex !== t.hex ? X.hexRepaired(t.hex, t.fullHex) : t.hex;
     const vars = {
       orig: showChar(t.ch), cp: uplus(t.cp), hex: hexTxt, E: encName(layer.E), W: encName(layer.W),
-      origCp: invisibleKind(t.cp) ? showChar(t.ch) : showChar(t.ch) + '（`' + uplus(t.cp) + '`）',
+      origCp: invisibleKind(t.cp) ? showChar(t.ch) : showChar(t.ch) + L.paren('`' + uplus(t.cp) + '`'),
       action: actionFor(c, layer, t), mapping: pieceMap(t),
       glyphs: encKnown(layer.W) && encType(layer.W) === 'single' && !t.pieces.some((p) => p.cross) ? glyphList(t) : pieceMap(t),
       glyph: showGlyph(t.ch),
     };
     const bom = t.bomHex
-      ? '开头的 `' + t.bomHex + '` 是 ' + encName(layer.E) + ' 的 BOM（字节顺序标记 `U+FEFF`），不是任何文字' +
-        (t.bomPieces.length && layer.W ? '，' + encName(layer.W) + ' 却把它读成了 ' + t.bomPieces.map((p) => showGlyph(p.ch)).join(' ') : '') + '。'
+      ? X.bom(t.bomHex, encName(layer.E), encName(layer.W), t.bomPieces.length && layer.W ? t.bomPieces.map((p) => showGlyph(p.ch)).join(' ') : null)
       : '';
-    if (t.bomOnly) return bom + '后面的 ASCII 字母在两种编码里字节相同，原样保留。';
-    let s = bom + fill(rng.pick(li === 0 ? v.trace : v.traceUp), vars, c.strict);
+    if (t.bomOnly) return bom + L.t.sp + X.bomOnlyRest;
+    let s = bom + (bom ? L.t.sp : '') + fill(rng.pick(li === 0 ? v.trace : v.traceUp), vars, c.strict);
     // Bit-level anatomy for the academic voice (and occasionally the humorous one).
     if (first && li === 0 && layer.E === 'utf-8' && !t.repaired && (c.style === 'academic' || (c.style === 'humor' && rng.chance(0.35)))) {
       const lay = utf8Layout(t.cp);
       if (lay && utf8Of(t.cp).map(hex2).join(' ') === t.hex) {
-        s += c.style === 'academic'
-          ? '按 UTF-8 规则，码位 `' + uplus(t.cp) + '` 的二进制 `' + lay.binary + '` 按 ' + lay.split + ' 位切开，填入模板 `' + lay.template + '`，即得 `' + lay.filled + '`，也就是 `' + t.hex + '`。'
-          : '（技术宅专享：`' + uplus(t.cp) + '` 的二进制按 ' + lay.split + ' 位切开，塞进 `' + lay.template + '`，正好得到 `' + t.hex + '`。）';
+        s += L.t.sp + (c.style === 'academic'
+          ? X.layoutAcademic(uplus(t.cp), lay.binary, lay.split, lay.template, lay.filled, t.hex)
+          : X.layoutHumor(uplus(t.cp), lay.split, lay.template, t.hex));
       }
     }
     return s;
@@ -2382,33 +2392,34 @@
   };
 
   function unescapeParagraph(c, layer, entry) {
-    const out = [SCHEME_DESC[layer.scheme] || '这一层是某种转义封装，剥开后才露出真正的文字。'];
+    const X = L.t.esc;
+    const out = [L.SCHEME_DESC[layer.scheme] || X.descDefault];
     const isByte = SCHEMES[layer.scheme] && SCHEMES[layer.scheme].byte;
     for (const t of entry.traces.slice(0, 2)) {
       const form = escapedForm(layer, t);
       const who = entry.li === 0 ? showChar(t.ch) : showGlyph(t.ch);
       if (isByte && t.hex) {
-        out.push(who + '的 ' + encName(layer.E) + ' 字节是 `' + t.hex + '`' + (form ? '，写出来就是 `' + form + '`' : '') + '。');
+        out.push(X.bytes(who, encName(layer.E), t.hex, form));
       } else if (form) {
-        out.push(who + (invisibleKind(t.cp) ? '' : '（`' + uplus(t.cp) + '`）') + '写作 `' + form + '`。');
+        out.push(X.form(who, invisibleKind(t.cp) ? '' : L.paren('`' + uplus(t.cp) + '`'), form));
       }
     }
-    if (isByte && layer.E === 'gbk') out.push('注意，这些字节要按 GBK 解读——早年不少中文网站的 URL 参数用的就是 GBK。');
+    if (isByte && layer.E === 'gbk') out.push(X.gbk);
     if (layer.scheme === 'unicode-escape') {
       const astral = cps(layer.after).find((ch) => ch.codePointAt(0) > 0xffff);
       if (astral) {
         const form = escapedForm(layer, { ch: astral, cp: astral.codePointAt(0) });
-        out.push('超出基本平面的字符要用一对代理项表示' + (form ? '，比如' + showChar(astral) + '写作 `' + form + '`' : '') + '——这是 Unicode 2.0（1996）为 UTF-16 引入的机制。');
+        out.push(X.astral(form ? showChar(astral) : null, form));
       }
     }
-    return out.join('');
+    return out.join(L.t.sp);
   }
 
   // Contract numbering (steps[0] = 第 1 层 = 地表层) for a layer given in formation order.
   function layerNo(c, li) { return c.layers.length - li; }
   function layerTitle(c, li) {
     const n = layerNo(c, li);
-    return '第 ' + n + ' 层（' + (n === c.layers.length ? '最深层' : n === 1 ? '地表层' : '中间层') + '）';
+    return L.t.layerTitle(n, n === c.layers.length ? 'deep' : n === 1 ? 'surface' : 'mid');
   }
 
   // Zero-width U+FFFD in a layer's garbled text: either this layer's wrong decoder could not pair
@@ -2439,6 +2450,7 @@
     const segsB = allB.filter((s) => s && !isKept(layer, s) && !isIdentity(layer, s));
     const segsA = allA.filter((s) => s && !isKept(layer, s) && !isIdentity(layer, s));
     const wType = encType(layer.W);
+    const N = L.t.note;
     if (!layer.bytes) return notes;
 
     // Misaligned "bites": garbled characters made of bytes from two original characters.
@@ -2454,45 +2466,41 @@
       const bites = segsB.filter((b) => b.end > b.start && layer.bytes[b.start] >= 0x80);
       if (wType === 'double' && layer.E === 'utf-8' && multi.length >= 2 && multi.every((s) => s.end - s.start === 3) &&
           bites.length && bites.every((b) => b.end - b.start === 2)) {
-        notes.push('UTF-8 里这些字符都是 3 个字节一组，' + encName(layer.W) + ' 却是 2 个字节一口——3 和 2 的最小公倍数是 6，每 6 个字节（两个字）才重新对齐一次。');
+        notes.push(N.lcm(encName(layer.W)));
       }
     }
     // Shift_JIS half-width katakana: single bytes 0xA1–0xDF that escaped a bite.
     if (layer.W === 'shift_jis') {
       const kana = segsB.filter((b) => b.ch && /[\uff61-\uff9f]/.test(b.ch));
       if (kana.length) {
-        const why = layer.E === 'utf-8'
-          ? 'UTF-8 的续字节恰好落在这个区间、又没被前一个字节"咬走"时，就会单独成字。'
-          : layer.E === 'euc-jp'
-            ? 'EUC-JP 的每个字节都在 0xA1–0xFE，其中落在 0xA1–0xDF 的，就被 Shift_JIS 当成了单字节的半角片假名。'
-            : encName(layer.E) + ' 的字节恰好落在这个区间、又没被前一个字节"咬走"时，就会单独成字。';
-        notes.push('其中 ' + kana.length + ' 个半角片假名（如 ' + showGlyph(kana[0].ch) + '）来自 Shift_JIS 的单字节区 0xA1–0xDF：' + why);
+        const why = layer.E === 'utf-8' ? N.kanaWhyUtf8 : layer.E === 'euc-jp' ? N.kanaWhyEucjp : N.kanaWhyOther(encName(layer.E));
+        notes.push(N.kana(kana.length, showGlyph(kana[0].ch), why));
       }
     }
     // Invisible C1 controls (Windows-1252 undefined bytes / Latin-1 C1 range).
     if (wType === 'single') {
       const c1 = segsB.map((s) => s.ch || '').filter((ch) => { const cp = ch ? ch.codePointAt(0) : 0; return cp >= 0x80 && cp <= 0x9f; });
-      if (c1.length) notes.push('这一层还藏着 ' + c1.length + ' 个看不见的 C1 控制符（如 `' + uplus(c1[0].codePointAt(0)) + '`），复制粘贴时极易被吞掉。');
+      if (c1.length) notes.push(N.c1(c1.length, uplus(c1[0].codePointAt(0))));
     }
     if (encType(layer.E) === 'utf16' && wType === 'single') {
       const nul = cps(layer.before).filter((ch) => ch === '\u0000').length;
-      if (nul) notes.push('还有 ' + nul + ' 个 `U+0000`（空字符）：ASCII 字母在 UTF-16 里都要带一个 `00` 字节，单字节解码器把它们读成了看不见的空字符——所以这类文物常显示成"字母之间隔着空格"。');
+      if (nul) notes.push(N.nul(nul));
     }
     // Lone bytes that became U+FFFD, and gaps where bytes had already vanished.
     const errs = segsB.filter((b) => b.end > b.start && (b.error || b.ch === '\uFFFD'));
     if (errs.length) {
-      notes.push('有 ' + errs.length + ' 处字节（如 `' + hex(layer.bytes, errs[0].start, errs[0].end) + '`）凑不成合法字符，只好变成 `\uFFFD`——信息就是从这里开始丢失的。');
+      notes.push(N.errs(errs.length, hex(layer.bytes, errs[0].start, errs[0].end)));
     }
     const gaps = segsB.filter((b) => b.end === b.start);
     if (gaps.length) {
       const W = encName(layer.W);
-      const promise = layerHasRepair(c, entry.li) ? '，稍后的修复环节会处理' : '';
+      const promise = layerHasRepair(c, entry.li) ? N.promise : '';
       const o = gapOrigins(c, layer, entry.li, gaps);
       if (o.self.length) {
-        notes.push('乱码里有 ' + o.self.length + ' 处缺口（' + showGlyph(o.self[0].ch || '\uFFFD') + '）：那里的字节在 ' + W + ' 解码时落了单（凑不成合法字符），被换成了 `\uFFFD`，原字节随之丢失' + promise + '。');
+        notes.push(N.gapSelf(o.self.length, showGlyph(o.self[0].ch || '\uFFFD'), W, promise));
       }
       if (o.inherited.length) {
-        notes.push('这一层还有 ' + o.inherited.length + ' 处缺口（' + showGlyph(o.inherited[0].ch || '\uFFFD') + '）是' + layerTitle(c, entry.li + 1) + '留下的：那里的字节已经残缺，解不出合法字符，对应的原字节在那次转换中丢失了' + promise + '。');
+        notes.push(N.gapInherited(o.inherited.length, showGlyph(o.inherited[0].ch || '\uFFFD'), layerTitle(c, entry.li + 1), promise));
       }
     }
 
@@ -2512,11 +2520,11 @@
       hist.forEach((e, lead) => { if (!top || e.n > top.n) top = { lead, n: e.n, glyph: e.glyph, second: e.second }; });
       if (top && top.n >= 2) {
         const meaning = leadMeaning(top.lead, top.second, layer.W);
-        notes.push('顺带一提，这件文物里 ' + showGlyph(top.glyph) + ' 打头的组合出现了 ' + top.n + ' 次——它就是 UTF-8 前导字节 `' + hex2(top.lead) + '` 在 ' + encName(layer.W) + ' 里的样子' + (meaning ? '：' + meaning : '') + '。');
+        notes.push(N.lead(showGlyph(top.glyph), top.n, hex2(top.lead), encName(layer.W), meaning));
       }
     }
     if (layer.E === 'utf-8' && layer.W === 'gbk' && segsB.some((b) => b.ch === '锛')) {
-      notes.push('「锛」几乎是这类乱码的身份证：中文全角标点（，！？：）的 UTF-8 都以 `EF BC` 开头，被 GBK 对齐咬下时就是「锛」。');
+      notes.push(N.kunId);
     }
     return notes;
   }
@@ -2534,13 +2542,11 @@
     const W = encName(layer.W);
     if (layer.E && !seenE.has(layer.E)) {
       seenE.add(layer.E);
-      intro.push(encKnown(layer.E)
-        ? trueDesc(c, layer)
-        : E + ' 是本馆尚未收录的编码，我们只能从字节本身观察它。');
+      intro.push(encKnown(layer.E) ? trueDesc(c, layer) : L.t.para.unknownE(E));
     }
     if (layer.W && !seenW.has(layer.W) && !encKnown(layer.W)) {
       seenW.add(layer.W);
-      intro.push(W + ' 同样不在本馆的码表档案里，下面只陈述字节与字符的对应关系。');
+      intro.push(L.t.para.unknownW(W));
     }
     if (layer.W && !seenW.has(layer.W)) {
       seenW.add(layer.W);
@@ -2553,7 +2559,7 @@
     }
     // Layout: what the two encodings are → one line per traced character → data-driven notes.
     const lines = [];
-    if (intro.length) lines.push(intro.join(''));
+    if (intro.length) lines.push(intro.join(L.t.sp));
     if (entry.traces.length) {
       entry.traces.forEach((t, i) => lines.push(traceSentence(c, layer, t, entry.li, rng, i === 0)));
     } else if (layer.bytes && layer.bytes.length) {
@@ -2561,12 +2567,12 @@
       const run = changedRuns(layer)[0];
       const from = run && run.end > run.start ? run.start : 0;
       const to = run && run.end > run.start ? Math.min(run.end, from + 6) : Math.min(6, layer.bytes.length);
-      lines.push((from ? '这一层里被误读的字节从 `' : '这一层开头的几个字节是 `') + hex(layer.bytes, from, to) + '`' + (from ? ' 开始' : '') + '，' + W + ' 把它们读成了' + quote(run ? run.before : layer.before, 8) + '。');
+      lines.push(L.t.para.bytesRun(from, hex(layer.bytes, from, to), W, quote(run ? run.before : layer.before, 8)));
     } else {
-      lines.push(E + ' 写下的文字被 ' + W + ' 误读，变成了' + quote(layer.before, 12) + '。');
+      lines.push(L.t.para.noBytes(E, W, quote(layer.before, 12)));
     }
     const notes = layerNotes(c, layer, entry, rng);
-    if (notes.length) lines.push(notes.join(''));
+    if (notes.length) lines.push(notes.join(L.t.sp));
     return lines.join('\n');
   }
 
@@ -2578,19 +2584,19 @@
     }
     if (!chars.length) {
       const first = cps(c.input).find((ch) => /[A-Za-z0-9]/.test(ch)) || 'A';
-      return '它是纯 ASCII 文本：比如' + showChar(first) + '就是 `' + hex2(first.charCodeAt(0)) + '`。0x00–0x7F 这 128 个字符在 UTF-8、GBK、Big5、Shift_JIS、Windows-1252 里的字节完全相同，所以纯英文几乎不会乱码——这也是乱码总爱欺负非英语用户的原因。';
+      return L.t.spec.ascii(showChar(first), hex2(first.charCodeAt(0)));
     }
     const lines = chars.map((ch) => {
       const cp = ch.codePointAt(0);
-      let s = showChar(ch) + '（`' + uplus(cp) + '`）在 UTF-8 中是 `' + utf8Of(cp).map(hex2).join(' ') + '`';
+      let s = L.t.spec.line(showChar(ch), uplus(cp), utf8Of(cp).map(hex2).join(' '));
       try {
         const C = MBX.Codecs;
         const gbk = C && typeof C.encodeChar === 'function' ? C.encodeChar('gbk', ch) : null;
-        if (gbk && gbk.length) s += '，在 GBK 中则是 `' + gbk.map(hex2).join(' ') + '`';
+        if (gbk && gbk.length) s += L.t.spec.gbk(gbk.map(hex2).join(' '));
       } catch (_) { /* codecs optional */ }
       return s;
     });
-    return lines.join('；') + '。同一个字，不同的编码给出完全不同的字节——字节本身不带"编码说明书"，这正是乱码的根源。';
+    return L.t.spec.end(lines);
   }
 
   function buildMechanism(c) {
@@ -2599,7 +2605,7 @@
     const parts = [];
 
     if (c.status === 'clean') {
-      return rng.pick(v.specimenIntro) + specimen(c);
+      return rng.pick(v.specimenIntro) + L.t.sp + specimen(c);
     }
 
     if (!c.layers.length) {
@@ -2608,26 +2614,27 @@
         const used = c.signatures.filter((s) => s.fact).slice(0, 2);
         for (const s of used) parts.push(s.fact.mechanism);
         if (!used.length) {
-          if (c.flags.nFFFD) parts.push(SIGNATURE_FACTS.replacement.mechanism);
-          else if (c.flags.nQ >= 3) parts.push(SIGNATURE_FACTS['question-marks'].mechanism);
-          else parts.push('关键字节在某次有损转换中被替换或丢弃，剩下的字符已经不足以推断原貌。');
+          if (c.flags.nFFFD) parts.push(L.SIGNATURE_FACTS.replacement.mechanism);
+          else if (c.flags.nQ >= 3) parts.push(L.SIGNATURE_FACTS['question-marks'].mechanism);
+          else parts.push(L.t.mech.lostGeneric);
         }
         return parts.join('\n');
       }
       // unknown: show the clues we have
       parts.push(rng.pick(v.unknownMech));
       // each distinct clue once, its matches listed inside it
-      const clues = groupedSignals(c, 3).slice(0, 3).map((g) => (g.matches.length ? '片段 ' + g.matches.map(showGlyphRun).join('、') + ' —— ' : '') + g.hint);
-      if (clues.length) parts.push(clues.join('；') + '。');
-      else parts.push('它不像任何已知的乱码：既没有 `Ã`、`â€` 这类西欧误读指纹，也没有「锟」「縺」这类东亚误读指纹。');
+      const M = L.t.mech;
+      const clues = groupedSignals(c, 3).slice(0, 3).map((g) => M.clue(g.matches.map(showGlyphRun), g.hint));
+      if (clues.length) parts.push(M.clues(clues));
+      else parts.push(M.noClue);
       const alt = c.alternatives[0];
       if (alt && Array.isArray(alt.steps) && alt.steps.length) {
         const deep = prepStep(alt.steps[alt.steps.length - 1]);
         if (deep.kind === 'transcode' && deep.bytes) {
-          parts.push('如果硬要猜，最接近的假说是"' + safe(alt.label || '另一条链路') + '"：' + openingBytes(deep) + '，但可读性仍不达标。');
+          parts.push(M.altGuess(safe(L === ZH ? alt.label || L.t.altLabelDefault : labelOf(alt, L.t.altLabelDefault)), openingBytes(deep)));
         }
       }
-      parts.push(c.input && !isAsciiText(c.input) ? '要确认真相，最好拿到原始文件的字节，而不是复制粘贴后的文字。' : '要确认真相，最好拿到原始文件的字节。');
+      parts.push(c.input && !isAsciiText(c.input) ? M.needBytesText : M.needBytes);
       return parts.join('\n');
     }
 
@@ -2636,14 +2643,14 @@
       const k = c.transcodes.length;
       const esc = c.layers.length - k;
       parts.push(fill(rng.pick(usable(v.multiIntro, c)), {
-        n: c.layers.length, k, escNote: esc ? '、' + esc + ' 层转义封装' : '', escAnd: esc ? '与 ' + esc + ' 层转义封装' : '',
+        n: c.layers.length, k, escNote: L.t.mech.escNote(esc), escAnd: L.t.mech.escAnd(esc),
       }, c.strict));
     }
     const seenE = new Set();
     const seenW = new Set();
     c.traces.forEach((entry) => {
       const layer = entry.layer;
-      const head = c.layers.length > 1 ? '**' + layerTitle(c, entry.li) + '**——' : '';
+      const head = c.layers.length > 1 ? L.t.mech.layerHead(layerTitle(c, entry.li)) : '';
       const body = layer.kind === 'unescape'
         ? unescapeParagraph(c, layer, entry)
         : transcodeParagraph(c, layer, entry, seenE, seenW, rng);
@@ -2661,12 +2668,10 @@
     if (tc.length === 1) for (const e of c.traces) for (const t of e.traces) if (t.bomHex && e.layer === tc[0]) n1 -= t.bomPieces.length;
     if (n0 > 0 && n1 > 0 && n0 !== n1) {
       const ratio = n1 / n0;
-      parts.push('整体看，' + n0 + ' 个原字符经过误读，' + (ratio > 1 ? '膨胀' : '压缩') + '成了 ' + n1 + ' 个字符（约 ' + ratio.toFixed(1) + ' 倍）。');
+      parts.push(L.t.mech.ratio(n0, n1, ratio));
     }
     if (c.part && c.part.keptN > 0) {
-      parts.push(c.part.clean
-        ? '其余 ' + c.part.keptN + ' 个字符原本就是正常文字，从没被误读过，原样保留。'
-        : '其余 ' + c.part.keptN + ' 个字符没有经过这条链路，保持原样。');
+      parts.push(c.part.clean ? L.t.mech.keptClean(c.part.keptN) : L.t.mech.kept(c.part.keptN));
     }
     if (c.status === 'irrecoverable') {
       // the signature story only when the byte traces above have not told it already
@@ -2704,7 +2709,7 @@
       }
     }
     const bytes = '`' + hex(layer.bytes, 0, end) + '`';
-    return chars ? '它把开头的字节 ' + bytes + ' 解释成' + quote(chars, 10) : '它从开头是 ' + bytes + ' 的字节读起';
+    return L.t.mech.opening(bytes, chars ? quote(chars, 10) : null);
   }
 
   /* ---------- dating / repair / conservation / easter / closing ---------- */
@@ -2712,12 +2717,12 @@
   function buildDating(c) {
     const v = c.voice;
     const rng = c.rng('dating');
-    const evidence = c.era.evidence.join('');
-    const vars = { evidence, era: c.era.label, site: c.site, eraShort: c.era.label.replace(/（[^）]*）$/, '') };
+    const evidence = c.era.evidence.join(L.t.sp);
+    const vars = { evidence, era: c.era.label, site: c.site, eraShort: L.t.eraShort(c.era.label) };
     if (c.status === 'clean') return fill(rng.pick(v.datingClean), vars, c.strict);
     if (c.era.start == null) {
       let s = fill(rng.pick(v.datingUnknown), vars, c.strict);
-      if (c.site && c.status !== 'unknown') s += '推测出土地点：' + c.site + '。';
+      if (c.site && c.status !== 'unknown') s += L.t.sp + L.t.siteSuffix(c.site);
       return s;
     }
     let s = fill(rng.pick(v.dating), vars, c.strict);
@@ -2725,16 +2730,17 @@
     for (const p of c.pairs) for (const x of p.facts.culprits || []) if (culprits.indexOf(x) < 0) culprits.push(x);
     if (culprits.length) {
       const pickN = rng.shuffle(culprits).slice(0, Math.min(culprits.length, c.style === 'snark' ? 3 : 2));
-      s += fill(rng.pick(v.suspects), { culprits: pickN.map(safe).join('、') }, c.strict);
+      s += L.t.sp + fill(rng.pick(v.suspects), { culprits: L.t.list(pickN.map(safe)) }, c.strict);
     }
     return s;
   }
 
   function reprFrom(from) {
-    if (from === '�') return '一个 `�`';
-    if (from === '?') return '一个 `?`';
-    if (from === ' ') return '一个空格';
-    if (!from) return '一处空缺';
+    const F = L.t.rep.from;
+    if (from === '�') return F.fffd;
+    if (from === '?') return F.q;
+    if (from === ' ') return F.space;
+    if (!from) return F.none;
     return showGlyph(from);
   }
 
@@ -2757,7 +2763,7 @@
   // A candidate character: invisible ones as a bare code point (no nested parentheses).
   function candShow(ch) {
     const cp = ch.codePointAt(0);
-    return invisibleKind(cp) ? '`' + uplus(cp) + '`' : '「' + safe(ch) + '」';
+    return invisibleKind(cp) ? '`' + uplus(cp) + '`' : quoteLike(ch) ? '`' + ch + '`' : L.q[0] + safe(ch) + L.q[1];
   }
 
   // Which bytes of a gap-repaired character survived, and where they hide in the mojibake.
@@ -2783,45 +2789,41 @@
       const stepIdx = Number.isInteger(rep.step) ? rep.step : c.steps.indexOf(layer);
       // A repair in an upper layer guesses an intermediate mojibake character, not a final one.
       const intermediate = stepIdx >= 0 && stepIdx !== c.steps.length - 1;
-      // The engine reports index -1 when a deeper-layer repair cannot be traced to the output.
-      const at = isNum(rep.index) && rep.index >= 0 ? '第 ' + (rep.index + 1) + ' 个字' : null;
-      const pos = intermediate
-        ? layerTitle(c, c.steps.length - 1 - stepIdx) + '的一个中间字符'
-        : at || '某个字';
-      const to = intermediate ? showGlyph(rep.to || '') + (at ? '（它最终落在原文' + at + '上）' : '') : showChar(rep.to || '');
       const others = (Array.isArray(rep.candidates) ? rep.candidates : []).filter((x) => x && x !== rep.to).slice(0, 3);
       if (others.length) hasCands = true;
-      const cands = others.length ? '（备选：' + others.map(candShow).join('') + '）' : '';
       const W = repairWrongDecoder(c, rep);
-      const Wn = encName(W);
-      const En = layer && layer.E ? encName(layer.E) : 'UTF-8';
-      let line;
+      // o: language-neutral facts; the pack words the sentence (L.t.rep.line).
+      const o = {
+        intermediate,
+        layerTitle: intermediate ? layerTitle(c, c.steps.length - 1 - stepIdx) : null,
+        // The engine reports index -1 when a deeper-layer repair cannot be traced to the output.
+        atN: isNum(rep.index) && rep.index >= 0 ? rep.index + 1 : null,
+        toGlyph: showGlyph(rep.to || ''),
+        toChar: showChar(rep.to || ''),
+        cands: others.map(candShow),
+        Wn: encName(W),
+        En: layer && layer.E ? encName(layer.E) : 'UTF-8',
+        from: reprFrom(rep.from),
+      };
+      let kind;
       if (rep.reason === 'gap') {
         const sv = intermediate ? null : gapSurvivors(c, rep, layer);
-        const surface = stepIdx === 0;
+        o.surfaceW = !!(stepIdx === 0 && W);
         if (sv) {
-          line = pos + '只剩下前 ' + sv.n + ' 个字节 `' + sv.hex + '`' +
-            (sv.hosts.length ? '（藏在乱码' + quote(sv.hosts.join(''), 8) + '里）' : '') +
-            '，其余 ' + sv.missing + ' 个字节' + (surface && W ? '在 ' + Wn + ' 解码时落了单、变成了 `�`' : '在转换中丢失了') +
-            '，原字节随之丢失。根据前后字节的 ' + En + ' 结构，修复师推断它是' + to + cands + '。';
-        } else {
-          line = pos + '的位置只剩下' + reprFrom(rep.from) + '，它的字节' + (surface && W ? '在 ' + Wn + ' 解码时落了单、被换成了 `�`' : '在转换中丢失了') +
-            '。根据前后字节的 ' + En + ' 结构，修复师推断它是' + to + cands + '。';
-        }
+          kind = 'gapSurvivors';
+          Object.assign(o, { n: sv.n, hex: sv.hex, missing: sv.missing, hosts: sv.hosts.length ? quote(sv.hosts.join(''), 8) : null });
+        } else kind = 'gap';
       } else if (rep.reason === 'nbsp') {
-        line = pos + '的一个续字节被"降级"了：UTF-8 续字节 `A0` 在 ' + Wn + ' 里是不换行空格（NBSP），复制粘贴时变成了普通空格 `20`。把它换回 `A0` 后，复原出' + to + cands + '。';
+        kind = 'nbsp';
       } else if (rep.reason === 'dropped') {
         const inv = invisibleBytes(W);
-        line = pos + '少了一个字节：' + (inv.length
-          ? Wn + ' 会把 ' + formatByteList(inv) + ' 解成看不见的控制符，复制时最容易被吞掉。修复师逐一试了这些候选字节，补回了'
-          : Wn + ' 解出的某个看不见的字符在复制时被吞掉了。修复师逐一试了可能的字节，补回了') + to + cands + '。';
-      } else {
-        line = pos + '由' + reprFrom(rep.from) + '修复为' + to + cands + '。';
-      }
-      lines.push(CIRCLED[lines.length - 1] + ' ' + line);
+        kind = 'dropped';
+        o.inv = inv.length ? formatByteList(inv) : null;
+      } else kind = 'other';
+      lines.push(CIRCLED[lines.length - 1] + ' ' + L.t.rep.line(kind, o));
     });
-    if (c.repairs.length > 5) lines.push('……另有 ' + (c.repairs.length - 5) + ' 处修复，此处从略。');
-    if (hasCands) lines.push('（带备选的字是根据字频与上下文推断出的最可能结果，并非百分之百确定。）');
+    if (c.repairs.length > 5) lines.push(L.t.rep.more(c.repairs.length - 5));
+    if (hasCands) lines.push(L.t.rep.candsNote);
     return lines.join('\n');
   }
 
@@ -2853,6 +2855,7 @@
   // recipe only when the standard library can run it; otherwise the sentence says why not.
   function pythonRecipe(c) {
     if (!c.steps.length) return null;
+    const PY = L.t.py;
     let expr = 's';
     let tolerant = 's';
     let needSloppy = false;
@@ -2890,16 +2893,16 @@
           if (SLOPPY[st.W]) {
             wpy = SLOPPY[st.W];
             needSloppy = true;
-            notes.push('乱码里含 `' + uplus(hit) + '` 这类 ' + encName(st.W) + ' 未定义字节变成的控制符，标准库的 `' + w.py + '` 编不回去会报错，所以借用 ftfy 的 `' + wpy + '`（需先 `pip install ftfy`）');
+            notes.push(PY.sloppy(uplus(hit), encName(st.W), w.py, wpy));
           } else {
-            notes.push('乱码里含 `' + uplus(hit) + '` 这类 ' + encName(st.W) + ' 未定义字节变成的控制符，Python 的 `' + w.py + '` 编不回去，这一步会报错');
+            notes.push(PY.undefinedByte(uplus(hit), encName(st.W), w.py));
           }
         }
       }
       // GBK / Big5 / EUC-KR private-use characters have no mapping in Python's tables.
       if (/^(gbk|big5|euc-kr)$/.test(st.W) && !blocked) {
         const pua = cps(garbled).find((ch) => { const cp = ch.codePointAt(0); return cp >= 0xe000 && cp <= 0xf8ff; });
-        if (pua) blocked = '乱码里含私用区字符（如 `' + uplus(pua.codePointAt(0)) + '`），Python 标准库的 `' + w.py + '` 编解码器无法把它们编回字节，这行会报错——只能回到原始文件';
+        if (pua) blocked = PY.pua(uplus(pua.codePointAt(0)), w.py);
       }
       // A BOM at the head of the deepest layer: decode it away, as the narration shows the text.
       let epy = e.py;
@@ -2908,34 +2911,32 @@
       const encodeFails = st.W !== 'utf-8' && !!st.segsBefore && st.segsBefore.some((s) => s && s.end === s.start && !isKept(st, s));
       const dec = st.bytes ? decodesCleanly(st.E, st.bytes) : null;
       const decodeFails = dec ? !dec.ok : (st.segsAfter || []).some((s) => s && (s.error || s.repaired));
-      if (encodeFails) why.push('乱码里的 `�` 编不回 ' + encName(st.W) + ' 字节（UnicodeEncodeError）');
-      if (decodeFails) why.push('残缺的 ' + encName(st.E) + ' 字节序列解不出来（UnicodeDecodeError）');
+      if (encodeFails) why.push(PY.whyEncode(encName(st.W)));
+      if (decodeFails) why.push(PY.whyDecode(encName(st.E)));
       if (encodeFails || decodeFails) needTolerant = true;
       expr += ".encode('" + wpy + "').decode('" + epy + "')";
       tolerant += ".encode('" + wpy + "'" + (encodeFails ? ", errors='ignore'" : '') + ").decode('" + epy + "'" + (decodeFails ? ", errors='replace'" : '') + ')';
     }
     const prefix = needSloppy ? 'import ftfy.bad_codecs; ' : '';
     const code = '`' + prefix + expr + '`';
-    if (blocked) return '理论上的 Python 还原咒语是 ' + code + '，但' + blocked + '。';
+    if (blocked) return PY.blocked(code, blocked);
     const lossy = c.repairs.length > 0 || c.steps.some((st) => st.lossy);
     if (needTolerant) {
       const single = c.steps.length === 1 && c.steps[0].kind === 'transcode';
       const sim = single && c.steps[0].bytes ? decodesCleanly(c.steps[0].E, c.steps[0].bytes) : null;
-      notes.push('它带有缺口，直接运行会因' + why.filter((x, i) => why.indexOf(x) === i).join('、') + '而抛出异常；可改用 `' + prefix + tolerant + '`' +
-        (sim && sim.text ? '（得到' + quote(sim.text, 24) + '）' : '') +
-        (c.repairs.length ? '，丢失的字节仍需像本馆这样做修复推断' : '，丢失的字节会以 `�` 标出'));
+      notes.push(PY.tolerant(why.filter((x, i) => why.indexOf(x) === i), prefix + tolerant, sim && sim.text ? quote(sim.text, 24) : null, c.repairs.length > 0));
     } else if (lossy) {
-      notes.push('它带有缺口，这行代码只能还原没丢的部分，缺失的字节需要像本馆这样做修复推断');
+      notes.push(PY.lossy);
     }
     // A partial result: only the garbled run(s) go through the spell, never the whole text.
     let target = '';
     if (c.status === 'partial' && c.part && c.part.frags.length) {
-      target = '对乱码片段' + fragsText(c, 2) + '执行 ';
+      target = PY.target(fragsText(c, 2));
       notes.unshift(c.part.unencodable
-        ? '只对乱码片段执行：其余文字里有 ' + encName(c.transcodes.length ? c.transcodes[c.transcodes.length - 1].W : null) + ' 编不了的字符，整段执行会报错'
-        : '只对乱码片段执行：其余文字本来就是好的，整段执行反而会把它们弄坏');
+        ? PY.onlyFragsUnencodable(encName(c.transcodes.length ? c.transcodes[c.transcodes.length - 1].W : null))
+        : PY.onlyFrags);
     }
-    return '本件文物的 Python 还原咒语：' + target + code + (notes.length ? '（' + notes.join('；') + '）' : '') + '。';
+    return PY.recipe(target, code, notes);
   }
 
   // `.encode('x').decode('y')` pairs named in a piece of advice.
@@ -2966,7 +2967,7 @@
     let tips = s.fact.tips.slice();
     if (s.id === 'replacement') {
       const ex = replacementExample(c);
-      if (ex) tips[0] = "回到源头：用正确的编码重新读取原始文件（这件文物多半要用 Python `open(path, encoding='" + ex + "')`），而不是在已经出现 `�` 的文本上修修补补。";
+      if (ex) tips[0] = L.t.replacementTip(ex);
     }
     // utf-16-le would keep the BOM as U+FEFF; with a BOM present, encoding='utf-16' is the right call
     if (s.id === 'utf16-nul' && c.signatures.some((x) => x.id === 'utf16-bom')) tips = tips.filter((t) => t.indexOf('utf-16-le') < 0);
@@ -2979,42 +2980,31 @@
     const tips = [];
     const add = (t) => { if (t && tips.indexOf(t) < 0) tips.push(t); };
 
+    const K = L.t.cons;
     if (c.status === 'clean') {
-      rng.shuffle([
-        '保持全链路 UTF-8：文件、数据库、HTTP 头与终端用同一种编码。',
-        "读写文件时显式声明编码，例如 Python 的 `open(path, encoding='utf-8')`。",
-        '网页在 `<head>` 开头写 `<meta charset="utf-8">`。',
-        '数据库用 `utf8mb4`，别用最多 3 字节的 MySQL `utf8`。',
-        '导出 CSV 给 Excel 时，用"CSV UTF-8"格式或带上 BOM。',
-      ]).slice(0, max).forEach(add);
+      rng.shuffle(K.clean.slice()).slice(0, max).forEach(add);
     } else if (c.status === 'unknown' && !c.debugMemory) {
-      rng.shuffle([
-        '尽量找到原始文件，而不是复制粘贴后的文字——字节才是第一手证据。',
-        '用 `xxd`（Linux/macOS）或 `Format-Hex`（PowerShell）查看原始字节，十六进制里的规律往往比字符更诚实。',
-        '提供更长的样本：统计特征越多，判断越可靠。',
-        '去赝品工坊试试：看看哪一种"原编码 → 误读为"的组合能造出同款乱码。',
-        '确认它真的是文本：压缩包、图片或加密数据被当成文本打开，也会显示成一堆乱码。',
-      ]).slice(0, max).forEach(add);
+      rng.shuffle(K.unknown.slice()).slice(0, max).forEach(add);
     } else {
       const recipe = c.status === 'irrecoverable' ? null : pythonRecipe(c);
       const covered = recipe ? commandsIn(recipe) : [];
       // a tip that is little more than the recipe's own command would only repeat it
       const repeatsRecipe = (t) => {
         const cmds = commandsIn(t);
-        return cmds.length > 0 && cmds.every((x) => covered.indexOf(x) >= 0) && stripMarkup(t.replace(/`[^`]*`/g, '')).length <= 24;
+        return cmds.length > 0 && cmds.every((x) => covered.indexOf(x) >= 0) && stripMarkup(t.replace(/`[^`]*`/g, '')).length <= K.recipeEchoMax;
       };
       const pairTips = [];
       c.pairs.forEach((p) => { for (const t of p.facts.tips || []) if (pairTips.indexOf(t) < 0) pairTips.push(t); });
-      const plain = pairTips.filter((t) => !(recipe && (t.indexOf('急救') >= 0 || repeatsRecipe(t))));
+      const plain = pairTips.filter((t) => !(recipe && (K.isRescue(t) || repeatsRecipe(t))));
       if (plain.length) add(plain[0]);
       if (recipe) add(recipe);
       if (c.flags.samePair && c.transcodes[0].E === 'utf-8' && /^(windows-1252|iso-8859-1)$/.test(c.transcodes[0].W)) {
-        add('多层乱码要逐层剥：上面的咒语里每一对 encode/decode 剥掉一层；如果是 MySQL 里的双重编码，可以用 ' + MYSQL_DOUBLE_FIX + ' 剥掉一层（先备份！）。');
+        add(K.multi(MYSQL_DOUBLE_FIX));
       }
-      if (c.flags.astral) add('原文含有 4 字节 UTF-8 字符（如 emoji）：MySQL 必须用 `utf8mb4`（5.5.3 起提供），`utf8`（utf8mb3）存不下。');
+      if (c.flags.astral) add(K.astral);
       for (const s of c.signatures) if (s.fact) for (const t of signatureTips(c, s)) if (!(recipe && repeatsRecipe(t))) add(t);
       rng.shuffle(plain.slice(1)).forEach((t) => { if (tips.length < max) add(t); });
-      if (!tips.length) add('文件、数据库、网页与终端统一使用 UTF-8，并且每一处都显式声明编码。');
+      if (!tips.length) add(L.t.allUtf8Tip);
     }
     // signature-specific advice may push the list one item past the usual length
     const list = tips.slice(0, max + (c.signatures.length ? 1 : 0));
@@ -3022,6 +3012,7 @@
   }
 
   function easterCandidates(c) {
+    const EG = L.t.egg;
     const data = []; // facts computed from this relic's bytes: preferred
     const lore = [];
     for (const layer of c.layers) {
@@ -3031,9 +3022,7 @@
         const hit = layer.segsAfter.find((s) => s.end - s.start === 2 && layer.bytes[s.start + 1] === 0x5c);
         if (hit) {
           const h = hex(layer.bytes, hit.start, hit.end);
-          data.push(layer.E === 'shift_jis'
-            ? '这件文物里的' + showChar(hit.ch) + '是 Shift_JIS 著名的"ダメ文字"：它的字节 `' + h + '` 第二个字节 `5C` 恰好是反斜杠 `\\`，在 C 字符串和文件路径里会被当成转义符——日本程序员为此头疼了几十年。'
-            : '这件文物里的' + showChar(hit.ch) + '属于 Big5 的"許功蓋"家族：它的字节 `' + h + '` 第二个字节 `5C` 恰好是反斜杠 `\\`，在程序里经常被当成转义符吞掉。');
+          data.push(layer.E === 'shift_jis' ? EG.dame(showChar(hit.ch), h) : EG.xugonggai(showChar(hit.ch), h));
         }
       }
       if (layer.E === 'koi8-r') {
@@ -3042,39 +3031,42 @@
           const b = layer.bytes[i] & 0x7f;
           s += b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : '·';
         }
-        if (/[A-Za-z]{2}/.test(s)) data.push('KOI8-R 的设计彩蛋：把这件文物原始字节的最高位抹掉，会得到' + quote(s, 24) + '——正是俄文的拉丁转写（大小写颠倒）。当年这样设计，是为了让俄文在只认 7 位的网关里也能勉强读懂。');
+        if (/[A-Za-z]{2}/.test(s)) data.push(EG.koi8(quote(s, 24)));
       }
     }
-    if (c.output.indexOf('\uFEFF') >= 0 && !c.signatures.some((s) => s.id === 'utf8-bom-1252')) data.push(SIGNATURE_FACTS['utf8-bom-1252'].lore);
-    if (c.flags.euro) data.push('欧元符号 € 的 UTF-8 是 `E2 82 AC`；在 Windows-1252 里它只占一个字节 `80`——那是 1998 年专门腾出来的位置。');
-    if (c.flags.emoji) data.push('emoji' + showChar(c.flags.emoji) + '的 UTF-8 是 `' + utf8Of(c.flags.emoji.codePointAt(0)).map(hex2).join(' ') + '`，足足 4 个字节；在 UTF-16 里它需要一对代理项——这正是很多老系统"吃不下"emoji 的原因。');
-    if (c.transcodes.some((l) => l.W === 'macintosh' || l.E === 'macintosh')) lore.push(ENCODING_FACTS.macintosh.trivia[0]);
+    const EF = L.ENCODING_FACTS;
+    if (c.output.indexOf('\uFEFF') >= 0 && !c.signatures.some((s) => s.id === 'utf8-bom-1252')) data.push(L.SIGNATURE_FACTS['utf8-bom-1252'].lore);
+    if (c.flags.euro) data.push(EG.euro);
+    if (c.flags.emoji) data.push(EG.emoji(showChar(c.flags.emoji), utf8Of(c.flags.emoji.codePointAt(0)).map(hex2).join(' ')));
+    if (c.transcodes.some((l) => l.W === 'macintosh' || l.E === 'macintosh')) lore.push(EF.macintosh.trivia[0]);
     const ids = [];
     for (const l of c.layers) { if (l.E && ids.indexOf(l.E) < 0) ids.push(l.E); if (l.W && ids.indexOf(l.W) < 0) ids.push(l.W); }
-    for (const id of ids) for (const t of (ENCODING_FACTS[id] && ENCODING_FACTS[id].trivia) || []) if (lore.indexOf(t) < 0) lore.push(t);
-    lore.push('"Mojibake"（文字化け）来自日语：moji 是"文字"，bake 是"变身、妖怪化"——字变成了妖怪。中文叫"乱码"，俄语叫 кракозябры，意思都差不多。');
-    if (c.status === 'clean' && isAsciiText(c.input)) lore.unshift(ENCODING_FACTS.ascii.trivia[0]);
+    for (const id of ids) for (const t of (EF[id] && EF[id].trivia) || []) if (lore.indexOf(t) < 0) lore.push(t);
+    lore.push(EG.mojibake);
+    if (c.status === 'clean' && isAsciiText(c.input)) lore.unshift(EF.ascii.trivia[0]);
     return { data, lore };
   }
 
   function buildEaster(c) {
     const rng = c.rng('easter');
+    const EG = L.t.egg;
     const parts = [rng.pick(c.voice.easterIntro)];
     const sigs = c.signatures.filter((s) => s.fact).slice(0, 2);
+    const noteOf = (s) => safe(s.sig.note && foreignOk(s.sig.note) ? s.sig.note : EG.unknownNote);
     if (sigs.length) {
       const mechanismUsed = !c.layers.length || c.status === 'irrecoverable';
       for (const s of sigs) {
-        const story = mechanismUsed ? s.fact.lore : s.fact.mechanism + s.fact.lore;
-        parts.push('**' + s.fact.title + '**：' + story + rng.pick(s.fact.quips[c.style]));
+        const story = mechanismUsed ? s.fact.lore : EG.story(s.fact.mechanism, s.fact.lore);
+        parts.push(EG.sigLine(s.fact.title, story, rng.pick(s.fact.quips[c.style])));
       }
       for (const s of c.signatures.filter((x) => !x.fact).slice(0, 1)) {
-        parts.push('**' + s.title + '**：' + safe(s.sig.note || '一种本馆尚未详细记录的乱码签名。'));
+        parts.push(EG.sigUnknown(s.title, noteOf(s)));
       }
       return parts.join('\n');
     }
     const unknownSig = c.signatures[0];
     if (unknownSig) {
-      parts.push('**' + unknownSig.title + '**：' + safe(unknownSig.sig.note || '一种本馆尚未详细记录的乱码签名。'));
+      parts.push(EG.sigUnknown(unknownSig.title, noteOf(unknownSig)));
       return parts.join('\n');
     }
     const { data, lore } = easterCandidates(c);
@@ -3088,24 +3080,464 @@
     let group = voiceGroup(c, c.voice.closing);
     if (group === 'partial') group = 'restored';
     const top = c.transcodes.length ? c.transcodes[c.transcodes.length - 1] : null;
-    return T(c, c.voice.closing[group], { W: top ? encName(top.W) : '那个解码器' }, 'closing');
+    return T(c, c.voice.closing[group], { W: top ? encName(top.W) : L.t.thatDecoder }, 'closing');
   }
 
   function buildTags(c) {
+    const G = L.t.tag;
     const tags = [];
     const add = (t) => { if (t && tags.indexOf(t) < 0) tags.push(t); };
     if (c.deepE) add(encName(c.deepE));
     for (const l of c.transcodes) add(encName(l.W));
-    for (const l of c.layers) if (l.kind === 'unescape' && SCHEMES[l.scheme]) add(SCHEMES[l.scheme].name);
-    if (c.layers.length) add(layerWord(c.layers.length));
+    for (const l of c.layers) if (l.kind === 'unescape' && SCHEMES[l.scheme]) add(L.SCHEMES[l.scheme].name);
+    if (c.layers.length) add(G.layers(c.layers.length));
     // no language tag when there is no language to speak of ("未知" reads like a status)
-    const noLang = c.langCode === 'unknown' || /^未知/.test(c.lang) || (c.best && /^[�\s]*$/.test(c.output));
+    const noLang = c.langCode === 'unknown' || L.t.isUnknownLang(c.lang) || (c.best && /^[�\s]*$/.test(c.output));
     if ((c.status !== 'irrecoverable' || c.output) && !noLang && !c.debugMemory) add(c.lang);
-    add(c.debugMemory ? '调试内存' : STATUS_TAGS[c.status]);
-    for (const s of c.signatures) add('名器：' + s.title);
-    if (c.flags.emoji) add('emoji');
-    if (c.repairs.length) add('含修复');
+    add(c.debugMemory ? G.debug : L.STATUS_TAGS[c.status]);
+    for (const s of c.signatures) add(G.sig(s.title));
+    if (c.flags.emoji) add(G.emoji);
+    if (c.repairs.length) add(G.repaired);
     return tags.map((t) => stripMarkup(t));
+  }
+
+  /* ======================================================================
+   * 7b. Locale packs (docs/ARCHITECTURE.md §11.3)
+   *
+   * A pack holds every user-visible word: the knowledge-base text, the docent voices, and `t`,
+   * the phrasing of each sentence the builders above assemble from data. The zh-CN pack below is
+   * the original wording, expression for expression (zh-CN output is byte-for-byte unchanged);
+   * other packs (src/narrator-en.js) register through Narrator.registerLocale and are merged over
+   * it, so a missing entry falls back to zh-CN instead of throwing.
+   * ==================================================================== */
+
+  const ZH_T = {
+    sp: '', // sentence joiner: Chinese sentences abut, English ones need a space
+    listSep: '、',
+    list: (arr) => arr.join('、'),
+    unknownEnc: '未知编码',
+    someInvisibleBytes: '若干不可见字节',
+    allUtf8Tip: '文件、数据库、网页与终端统一使用 UTF-8，并且每一处都显式声明编码。',
+    lead: {
+      latin1: (g) => '它是带音标拉丁字母（é、ü、ñ）与 ©、° 等符号的 UTF-8 前导字节' + (g ? '，满屏 ' + g + ' 基本就是它的指纹' : ''),
+      latinExt: '它是拉丁扩展字母（如中欧语言的 ł、ő）的 UTF-8 前导字节',
+      greek: '它是希腊字母的 UTF-8 前导字节',
+      cyrillic: (g) => '它是西里尔字母（俄文等）的 UTF-8 前导字节' + (g ? '，满屏 ' + g + ' 就是俄文的指纹' : ''),
+      hebrew: '它是希伯来字母的 UTF-8 前导字节',
+      arabic: '它是阿拉伯字母的 UTF-8 前导字节',
+      indic: '它是天城文、泰文等文字的 UTF-8 前导字节',
+      quotes: (g, wName, west) => '弯引号、破折号、省略号（“ ” ‘ ’ — …）的 UTF-8 都以 `E2 80` 开头' +
+        (g ? '，在 ' + wName + ' 里就是 ' + g + (west ? '——这大概是全世界出镜率最高的乱码' : '') : ''),
+      symbols: '它是各类标点与符号（€、™、箭头等）的 UTF-8 前导字节',
+      kana: '它是日文假名与中日韩标点的 UTF-8 前导字节',
+      cjk: (g) => 'E4–E9 是中日韩统一汉字的 UTF-8 前导字节' + (g ? '，看到成片的 ' + g + '，基本可以断定底下埋着汉字' : ''),
+      hangul: '它是韩文音节的 UTF-8 前导字节',
+      fullwidth: '它是全角字符、BOM 等的 UTF-8 前导字节',
+      astral: '它是 4 字节字符（emoji、生僻汉字）的 UTF-8 前导字节',
+    },
+    generic: {
+      tipUtf8: (eName) => '这类伤通常不可逆：`�` 替换发生时原字节已被丢弃，请回到源头用 ' + eName + ' 重新读取原始文件。',
+      tipRescue: (wpy, epy) => "急救：`s.encode('" + wpy + "').decode('" + epy + "')`。",
+      tipIconv: (iconv) => '统一转成 UTF-8：`iconv -f ' + iconv + ' -t UTF-8`。',
+      eraWhy: (eName, eBorn, wName, wBorn) => eName + ' 诞生于' + (/^\d/.test(eBorn) ? ' ' : '') + eBorn + '，' + wName + ' 诞生于' + (/^\d/.test(wBorn) ? ' ' : '') + wBorn + '，这种误读只可能发生在两者都已登场之后',
+      eraWhyUnknown: '这是一种本馆尚未收录的编码组合，暂时无法给出可靠的年代',
+      sites: (eName, wName) => ['一个用 ' + eName + ' 写下文字、却被当作 ' + wName + ' 打开的文件', '一套在 ' + eName + ' 与 ' + wName + ' 之间转手、却没人声明编码的系统'],
+      culprits: (wName) => ['缺失或错误的编码声明', '默认按 ' + wName + ' 解读文本的软件'],
+    },
+    utf8Extra: (arr) => arr.map((x) => '、' + x).join(''),
+    langText: (lang) => (/文本$/.test(lang) ? lang : lang + (/[A-Za-z0-9]$/.test(lang) ? ' 文本' : '文本')),
+    langFallback: { han: '中文', ascii: '英语', other: '文本' },
+    sameLang: (a, b) => a.charAt(0) === b.charAt(0),
+    isUnknownLang: (lang) => /^未知/.test(lang),
+    frags: (list, total, n) => list.join('、') + (total > n ? ' 等 ' + total + ' 段' : ''),
+    eraSpan: (start, end) => (end == null ? start + ' 年至今' : start + '–' + end + ' 年'),
+    eraLabel: (start, end) => {
+      if (start == null) return '年代不详';
+      if (end == null) return '约 ' + start + ' 年至今';
+      if (end <= start) return '约 ' + start + ' 年前后';
+      return '约 ' + start + '–' + end + ' 年';
+    },
+    eraShort: (label) => label.replace(/（[^）]*）$/, ''),
+    era: {
+      cleanAscii: 'ASCII（1963）至今通用，单凭字节无法断代。',
+      cleanOther: '它的字节在今天主流的 UTF-8 环境下一切正常，没有任何"地层"可供测年。',
+      cleanLabel: '当代（无需测年）',
+      pair: (tag, span, why) => tag + ' 型乱码的高发期大约在 ' + span + '。' + why + '。',
+      pairNoEra: (why) => why + '。',
+      sig: (title, why) => '就名器「' + title + '」而言，' + why + '。',
+      escape: (name, bornLabel) => '转义里包着的是 ' + name + ' 字节，而 ' + name + ' 诞生于' + (/^\d/.test(bornLabel) ? ' ' : '') + bornLabel + '，所以它不会早于这个年代。',
+      emoji: (shown) => '原文里出现了 emoji' + shown + '——Unicode 6.0（2010）才大批收录 emoji，所以它不会早于 2010 年。',
+      emojiMysql: '而且 emoji 是 4 字节 UTF-8，MySQL 直到 5.5.3（2010）才有能存它的 utf8mb4。',
+      euro: '原文含有欧元符号 €，它在 1998 年前后才进入 Unicode 与 Windows-1252（0x80），因此年代不早于 1998 年。',
+      garbledEuro: '乱码里出现了 `€`——说明误读它的是 1998 年之后、已在 0x80 放进欧元符号的 Windows-1252。',
+      koi8: 'KOI8-R 是上世纪 90 年代俄语 Unix、Usenet 与电子邮件的通用编码（RFC 1489，1993）。',
+      crossStrait: '简繁两种编码互相误读，是 1990–2000 年代两岸 BBS 与电子邮件往来时的常见事故。',
+      zipBox: (shown) => '文字里冒出了 DOS 制表符' + shown + '——CP437 的这类字形出现在文件名里，几乎就是 ZIP 压缩包的指纹。',
+      zip: 'CP437 出现在误读链路里，几乎就是 ZIP 文件名的指纹。',
+      scheme: {
+        percent: '外层的百分号编码说明它曾在网址或表单参数里旅行——2005 年的 RFC 3986 建议非 ASCII 字符先转 UTF-8 再做百分号编码。',
+        'quoted-printable': 'Quoted-Printable 是 MIME 电子邮件（1992 年起）的传输编码，说明它曾在邮件里旅行。',
+        'html-entity': '它被包在 HTML 字符实体里，说明曾栖身于网页源码。',
+        'unicode-escape': '`\\u` 转义说明它曾躺在 JSON、JavaScript 或 Java 源码里。',
+        'hex-escape': '`\\x` 转义多见于程序日志、调试输出和 Python/C 源码，说明它曾以字节串的形式被原样打印出来。',
+        'hex-dump': '十六进制转储是调试与取证时查看原始字节的常用形式，说明有人曾直接盯着它的字节看。',
+      },
+      multi: (n, extra) => '它被误读了 ' + n + ' 次，说明至少经历了 ' + n + ' 次迁移或转存（比如导出、导入、再导出），起始年份相应推后约 ' + extra + ' 年。',
+      noneChain: '这条链路本身不带年代信息，字节测年无从下手。',
+      noneAtAll: '没有找到可信的编码链路，字节测年无从下手。',
+    },
+    site: {
+      clean: '无需发掘——它一直好好地待在地表',
+      again: '，并在之后的一次数据迁移或导入导出中被再次误读',
+      then: (s) => '，后又辗转流入' + s,
+      wrapped: (site, habitat) => (site ? site + '，最后被封装进' + habitat : habitat),
+      unknown: '出土地点不明',
+      lost: '某次没有留下记录的有损转换现场',
+    },
+    memVars: (sigs, uniq) => ({
+      mem: uniq(sigs.map((s) => s.fact.memory)).join('和') || '未初始化的内存',
+      fill: uniq(sigs.map((s) => '`' + s.fact.fillByte + '`')).join('、'),
+      glyph: uniq(sigs.map((s) => '「' + s.fact.glyph + '」')).join(''),
+      detail: sigs.length ? '文物上共检出' + sigs.map((s) => '名器「' + s.title + '」' + s.count + ' 处').join('、') + '。' : '',
+    }),
+    confNone: '（尚未评估）',
+    chain: {
+      none: '链路不明',
+      someEscape: '某种转义',
+      escape: (i, sch, textOnly, encN) => {
+        const sp = /^[A-Za-z0-9\\]/.test(sch) ? ' ' : '';
+        if (i === 0) return (textOnly ? '文字' : '`' + encN + '` 字节') + '被写成了' + sp + sch;
+        return '最后又被写成了' + sp + sch;
+      },
+      first: (E, W) => '原本以 `' + E + '` 编码的文字被 `' + W + '` 误读',
+      next: (E, W) => '又按 `' + E + '` 编码后被 `' + W + '` 误读',
+      join: '，',
+    },
+    title: {
+      clean: (lang) => '『现代真品 · ' + lang + '』',
+      unknown: '『未定名文物 · 来历待考』',
+      debug: (t) => '『' + t + ' · 名器 · 调试内存』',
+      sigLost: (t) => '『' + t + ' · 名器 · 不可逆』',
+      nameless: '『无名残片 · 不可逆』',
+      escapeWrap: '转义封装',
+      layers: (o) => {
+        const parts = [o.origin];
+        const joined = o.kinds.join('/');
+        if (o.kinds.length) parts.push(joined + (/[A-Za-z0-9]$/.test(joined) ? ' ' : '') + '误读型');
+        if (o.schemes.length) parts.push(o.schemes.join('/') + (o.kinds.length ? '' : '型'));
+        if (o.irrecoverable) parts.push('不可逆');
+        else parts.push(layerWord(o.layers) + '地层' + (o.partial ? (o.partialClean ? ' · 局部误读' : ' · 残件') : ''));
+        return '『' + parts.join(' · ') + '』';
+      },
+    },
+    escapeWord: '转义',
+    subtitleS: (S) => (/^[A-Za-z\\]/.test(S) ? ' ' + S : S),
+    subtitleSig: (title, s) => '名器「' + title + '」 · ' + s,
+    progress: (pct) => (pct > 0 ? '约 ' + pct + '% 的文字经过还原' : '部分完成'),
+    fixed: {
+      frag: (bq, aq) => bq + (aq ? '被还原成了' + aq : '得到了还原'),
+      frags: (items, more) => '乱码片段' + items.join('、') + (more > 0 ? '，另有 ' + more + ' 段同样处理' : ''),
+      whole: (bq, aq) => bq + '被还原成了' + aq,
+    },
+    partNote: (fixed) => (fixed ? '其中' + fixed + '，其余部分保持原样' : '只有部分片段找到了可信的还原链路，其余部分保持原样'),
+    positions: (pos, count) => (!pos.length ? count + ' 处字符' : '第 ' + pos.slice(0, 4).join('、') + (pos.length > 4 ? ' 等' : '') + ' 个字'),
+    loss: {
+      fffd: (n) => n + ' 个替换字符 `�`',
+      q: (n) => n + ' 个问号 `?`',
+      sig: (title, n) => '名器「' + title + '」' + n + ' 处',
+      reasonFFFD: '替换字符出现的那一刻，原字节就被丢弃了。',
+      reasonQ: '问号是编码器在"装不下"时顶替原字符留下的。',
+      reasonOther: '关键字节在某次有损转换中丢失了。',
+      detail: (bits, reason) => {
+        const lead = bits.length && /^\d/.test(bits[0]) ? ' ' : '';
+        return (bits.length ? '文物上共检出' + lead + bits.join('、') + '。' : '') + reason;
+      },
+    },
+    signalItem: (hint, matches) => hint + (matches.length ? '（如 ' + matches.join('、') + '）' : ''),
+    signalNote: (items) => (items.length ? '检出的可疑特征：' + items.join('；') + '。' : '它没有表现出典型的乱码特征。'),
+    glyphRunInv: (q, invs) => q + '（含 ' + invs.join('、') + '）',
+    altLabelDefault: '另一条链路',
+    altConf: (pct) => (pct == null ? '置信度未评估' : '置信度 ' + pct + '%'),
+    id: {
+      fixedDefault: '我们抢救出了其中一部分片段',
+      fragsDefault: '乱码片段',
+      outputNote: (q) => '目前能勉强读出的是' + q + '。',
+      altNote: (o, l, cf) => '最接近的猜测是' + o + '（' + l + '），但' + cf + '。',
+      inferred: (positions) => '其中' + positions + '是根据残存字节推断补全的，并非原样还原。',
+      sigTitles: (titles, family) => (family ? titles.map((t) => '「' + t + '」').join('、') : titles.join('、')),
+    },
+    piece: {
+      next: (borrowHex, nb) => '（`' + borrowHex + '` 借自下一个字' + nb + '）',
+      prev: (borrowHex, nb) => '（`' + borrowHex + '` 来自上一个字' + nb + '）',
+      error: '（凑不成合法字符）',
+      sep: '、',
+    },
+    act: {
+      none: '读成了别的样子',
+      unknown: (pm) => '读成了 ' + pm,
+      single: (gl) => '逐字节读成了 ' + gl,
+      utf16: (pm) => '两个字节一组拼成了 ' + pm,
+      utf8: (pm) => '解出了 ' + pm,
+      double: (pm) => '分组读成了 ' + pm,
+    },
+    trace: {
+      hexRepaired: (h, full) => h + '（完整应为 ' + full + '，缺失的字节由修复推断）',
+      bom: (bomHex, E, W, glyphs) => '开头的 `' + bomHex + '` 是 ' + E + ' 的 BOM（字节顺序标记 `U+FEFF`），不是任何文字' +
+        (glyphs ? '，' + W + ' 却把它读成了 ' + glyphs : '') + '。',
+      bomOnlyRest: '后面的 ASCII 字母在两种编码里字节相同，原样保留。',
+      layoutAcademic: (U, bin, split, tpl, filled, h) => '按 UTF-8 规则，码位 `' + U + '` 的二进制 `' + bin + '` 按 ' + split + ' 位切开，填入模板 `' + tpl + '`，即得 `' + filled + '`，也就是 `' + h + '`。',
+      layoutHumor: (U, split, tpl, h) => '（技术宅专享：`' + U + '` 的二进制按 ' + split + ' 位切开，塞进 `' + tpl + '`，正好得到 `' + h + '`。）',
+    },
+    esc: {
+      descDefault: '这一层是某种转义封装，剥开后才露出真正的文字。',
+      bytes: (who, E, h, form) => who + '的 ' + E + ' 字节是 `' + h + '`' + (form ? '，写出来就是 `' + form + '`' : '') + '。',
+      form: (who, cpNote, form) => who + cpNote + '写作 `' + form + '`。',
+      gbk: '注意，这些字节要按 GBK 解读——早年不少中文网站的 URL 参数用的就是 GBK。',
+      astral: (shown, form) => '超出基本平面的字符要用一对代理项表示' + (form ? '，比如' + shown + '写作 `' + form + '`' : '') + '——这是 Unicode 2.0（1996）为 UTF-16 引入的机制。',
+    },
+    layerTitle: (n, pos) => '第 ' + n + ' 层（' + (pos === 'deep' ? '最深层' : pos === 'surface' ? '地表层' : '中间层') + '）',
+    note: {
+      lcm: (W) => 'UTF-8 里这些字符都是 3 个字节一组，' + W + ' 却是 2 个字节一口——3 和 2 的最小公倍数是 6，每 6 个字节（两个字）才重新对齐一次。',
+      kanaWhyUtf8: 'UTF-8 的续字节恰好落在这个区间、又没被前一个字节"咬走"时，就会单独成字。',
+      kanaWhyEucjp: 'EUC-JP 的每个字节都在 0xA1–0xFE，其中落在 0xA1–0xDF 的，就被 Shift_JIS 当成了单字节的半角片假名。',
+      kanaWhyOther: (E) => E + ' 的字节恰好落在这个区间、又没被前一个字节"咬走"时，就会单独成字。',
+      kana: (n, glyph, why) => '其中 ' + n + ' 个半角片假名（如 ' + glyph + '）来自 Shift_JIS 的单字节区 0xA1–0xDF：' + why,
+      c1: (n, U) => '这一层还藏着 ' + n + ' 个看不见的 C1 控制符（如 `' + U + '`），复制粘贴时极易被吞掉。',
+      nul: (n) => '还有 ' + n + ' 个 `U+0000`（空字符）：ASCII 字母在 UTF-16 里都要带一个 `00` 字节，单字节解码器把它们读成了看不见的空字符——所以这类文物常显示成"字母之间隔着空格"。',
+      errs: (n, h) => '有 ' + n + ' 处字节（如 `' + h + '`）凑不成合法字符，只好变成 `�`——信息就是从这里开始丢失的。',
+      promise: '，稍后的修复环节会处理',
+      gapSelf: (n, glyph, W, promise) => '乱码里有 ' + n + ' 处缺口（' + glyph + '）：那里的字节在 ' + W + ' 解码时落了单（凑不成合法字符），被换成了 `�`，原字节随之丢失' + promise + '。',
+      gapInherited: (n, glyph, title, promise) => '这一层还有 ' + n + ' 处缺口（' + glyph + '）是' + title + '留下的：那里的字节已经残缺，解不出合法字符，对应的原字节在那次转换中丢失了' + promise + '。',
+      lead: (glyph, n, leadHex, W, meaning) => '顺带一提，这件文物里 ' + glyph + ' 打头的组合出现了 ' + n + ' 次——它就是 UTF-8 前导字节 `' + leadHex + '` 在 ' + W + ' 里的样子' + (meaning ? '：' + meaning : '') + '。',
+      kunId: '「锛」几乎是这类乱码的身份证：中文全角标点（，！？：）的 UTF-8 都以 `EF BC` 开头，被 GBK 对齐咬下时就是「锛」。',
+    },
+    para: {
+      unknownE: (E) => E + ' 是本馆尚未收录的编码，我们只能从字节本身观察它。',
+      unknownW: (W) => W + ' 同样不在本馆的码表档案里，下面只陈述字节与字符的对应关系。',
+      bytesRun: (from, hexs, W, q) => (from ? '这一层里被误读的字节从 `' : '这一层开头的几个字节是 `') + hexs + '`' + (from ? ' 开始' : '') + '，' + W + ' 把它们读成了' + q + '。',
+      noBytes: (E, W, q) => E + ' 写下的文字被 ' + W + ' 误读，变成了' + q + '。',
+    },
+    spec: {
+      ascii: (shown, h) => '它是纯 ASCII 文本：比如' + shown + '就是 `' + h + '`。0x00–0x7F 这 128 个字符在 UTF-8、GBK、Big5、Shift_JIS、Windows-1252 里的字节完全相同，所以纯英文几乎不会乱码——这也是乱码总爱欺负非英语用户的原因。',
+      line: (shown, U, utf8hex) => shown + '（`' + U + '`）在 UTF-8 中是 `' + utf8hex + '`',
+      gbk: (h) => '，在 GBK 中则是 `' + h + '`',
+      end: (lines) => lines.join('；') + '。同一个字，不同的编码给出完全不同的字节——字节本身不带"编码说明书"，这正是乱码的根源。',
+    },
+    mech: {
+      lostGeneric: '关键字节在某次有损转换中被替换或丢弃，剩下的字符已经不足以推断原貌。',
+      clue: (matches, hint) => (matches.length ? '片段 ' + matches.join('、') + ' —— ' : '') + hint,
+      clues: (items) => items.join('；') + '。',
+      noClue: '它不像任何已知的乱码：既没有 `Ã`、`â€` 这类西欧误读指纹，也没有「锟」「縺」这类东亚误读指纹。',
+      altGuess: (label, opening) => '如果硬要猜，最接近的假说是"' + label + '"：' + opening + '，但可读性仍不达标。',
+      needBytesText: '要确认真相，最好拿到原始文件的字节，而不是复制粘贴后的文字。',
+      needBytes: '要确认真相，最好拿到原始文件的字节。',
+      escNote: (esc) => (esc ? '、' + esc + ' 层转义封装' : ''),
+      escAnd: (esc) => (esc ? '与 ' + esc + ' 层转义封装' : ''),
+      layerHead: (title) => '**' + title + '**——',
+      ratio: (n0, n1, r) => '整体看，' + n0 + ' 个原字符经过误读，' + (r > 1 ? '膨胀' : '压缩') + '成了 ' + n1 + ' 个字符（约 ' + r.toFixed(1) + ' 倍）。',
+      keptClean: (k) => '其余 ' + k + ' 个字符原本就是正常文字，从没被误读过，原样保留。',
+      kept: (k) => '其余 ' + k + ' 个字符没有经过这条链路，保持原样。',
+      opening: (bytes, q) => (q ? '它把开头的字节 ' + bytes + ' 解释成' + q : '它从开头是 ' + bytes + ' 的字节读起'),
+    },
+    siteSuffix: (site) => '推测出土地点：' + site + '。',
+    rep: {
+      from: { fffd: '一个 `�`', q: '一个 `?`', space: '一个空格', none: '一处空缺' },
+      line: (kind, o) => {
+        const at = o.atN != null ? '第 ' + o.atN + ' 个字' : null;
+        const pos = o.intermediate ? o.layerTitle + '的一个中间字符' : at || '某个字';
+        const to = o.intermediate ? o.toGlyph + (at ? '（它最终落在原文' + at + '上）' : '') : o.toChar;
+        const cands = o.cands.length ? '（备选：' + o.cands.join('') + '）' : '';
+        if (kind === 'gapSurvivors') {
+          return pos + '只剩下前 ' + o.n + ' 个字节 `' + o.hex + '`' +
+            (o.hosts ? '（藏在乱码' + o.hosts + '里）' : '') +
+            '，其余 ' + o.missing + ' 个字节' + (o.surfaceW ? '在 ' + o.Wn + ' 解码时落了单、变成了 `�`' : '在转换中丢失了') +
+            '，原字节随之丢失。根据前后字节的 ' + o.En + ' 结构，修复师推断它是' + to + cands + '。';
+        }
+        if (kind === 'gap') {
+          return pos + '的位置只剩下' + o.from + '，它的字节' + (o.surfaceW ? '在 ' + o.Wn + ' 解码时落了单、被换成了 `�`' : '在转换中丢失了') +
+            '。根据前后字节的 ' + o.En + ' 结构，修复师推断它是' + to + cands + '。';
+        }
+        if (kind === 'nbsp') {
+          return pos + '的一个续字节被"降级"了：UTF-8 续字节 `A0` 在 ' + o.Wn + ' 里是不换行空格（NBSP），复制粘贴时变成了普通空格 `20`。把它换回 `A0` 后，复原出' + to + cands + '。';
+        }
+        if (kind === 'dropped') {
+          return pos + '少了一个字节：' + (o.inv
+            ? o.Wn + ' 会把 ' + o.inv + ' 解成看不见的控制符，复制时最容易被吞掉。修复师逐一试了这些候选字节，补回了'
+            : o.Wn + ' 解出的某个看不见的字符在复制时被吞掉了。修复师逐一试了可能的字节，补回了') + to + cands + '。';
+        }
+        return pos + '由' + o.from + '修复为' + to + cands + '。';
+      },
+      more: (n) => '……另有 ' + n + ' 处修复，此处从略。',
+      candsNote: '（带备选的字是根据字频与上下文推断出的最可能结果，并非百分之百确定。）',
+    },
+    py: {
+      sloppy: (U, Wn, wpy, sloppy) => '乱码里含 `' + U + '` 这类 ' + Wn + ' 未定义字节变成的控制符，标准库的 `' + wpy + '` 编不回去会报错，所以借用 ftfy 的 `' + sloppy + '`（需先 `pip install ftfy`）',
+      undefinedByte: (U, Wn, wpy) => '乱码里含 `' + U + '` 这类 ' + Wn + ' 未定义字节变成的控制符，Python 的 `' + wpy + '` 编不回去，这一步会报错',
+      pua: (U, wpy) => '乱码里含私用区字符（如 `' + U + '`），Python 标准库的 `' + wpy + '` 编解码器无法把它们编回字节，这行会报错——只能回到原始文件',
+      whyEncode: (Wn) => '乱码里的 `�` 编不回 ' + Wn + ' 字节（UnicodeEncodeError）',
+      whyDecode: (En) => '残缺的 ' + En + ' 字节序列解不出来（UnicodeDecodeError）',
+      blocked: (code, why) => '理论上的 Python 还原咒语是 ' + code + '，但' + why + '。',
+      tolerant: (whys, code, simQ, repaired) => '它带有缺口，直接运行会因' + whys.join('、') + '而抛出异常；可改用 `' + code + '`' +
+        (simQ ? '（得到' + simQ + '）' : '') +
+        (repaired ? '，丢失的字节仍需像本馆这样做修复推断' : '，丢失的字节会以 `�` 标出'),
+      lossy: '它带有缺口，这行代码只能还原没丢的部分，缺失的字节需要像本馆这样做修复推断',
+      target: (frags) => '对乱码片段' + frags + '执行 ',
+      onlyFragsUnencodable: (Wn) => '只对乱码片段执行：其余文字里有 ' + Wn + ' 编不了的字符，整段执行会报错',
+      onlyFrags: '只对乱码片段执行：其余文字本来就是好的，整段执行反而会把它们弄坏',
+      recipe: (target, code, notes) => '本件文物的 Python 还原咒语：' + target + code + (notes.length ? '（' + notes.join('；') + '）' : '') + '。',
+    },
+    replacementTip: (ex) => "回到源头：用正确的编码重新读取原始文件（这件文物多半要用 Python `open(path, encoding='" + ex + "')`），而不是在已经出现 `�` 的文本上修修补补。",
+    cons: {
+      clean: [
+        '保持全链路 UTF-8：文件、数据库、HTTP 头与终端用同一种编码。',
+        "读写文件时显式声明编码，例如 Python 的 `open(path, encoding='utf-8')`。",
+        '网页在 `<head>` 开头写 `<meta charset="utf-8">`。',
+        '数据库用 `utf8mb4`，别用最多 3 字节的 MySQL `utf8`。',
+        '导出 CSV 给 Excel 时，用"CSV UTF-8"格式或带上 BOM。',
+      ],
+      unknown: [
+        '尽量找到原始文件，而不是复制粘贴后的文字——字节才是第一手证据。',
+        '用 `xxd`（Linux/macOS）或 `Format-Hex`（PowerShell）查看原始字节，十六进制里的规律往往比字符更诚实。',
+        '提供更长的样本：统计特征越多，判断越可靠。',
+        '去赝品工坊试试：看看哪一种"原编码 → 误读为"的组合能造出同款乱码。',
+        '确认它真的是文本：压缩包、图片或加密数据被当成文本打开，也会显示成一堆乱码。',
+      ],
+      // "急救" marks the one-line Python rescues, dropped when a relic-specific recipe exists
+      isRescue: (t) => t.indexOf('急救') >= 0,
+      recipeEchoMax: 24,
+      multi: (fix) => '多层乱码要逐层剥：上面的咒语里每一对 encode/decode 剥掉一层；如果是 MySQL 里的双重编码，可以用 ' + fix + ' 剥掉一层（先备份！）。',
+      astral: '原文含有 4 字节 UTF-8 字符（如 emoji）：MySQL 必须用 `utf8mb4`（5.5.3 起提供），`utf8`（utf8mb3）存不下。',
+    },
+    egg: {
+      dame: (shown, h) => '这件文物里的' + shown + '是 Shift_JIS 著名的"ダメ文字"：它的字节 `' + h + '` 第二个字节 `5C` 恰好是反斜杠 `\\`，在 C 字符串和文件路径里会被当成转义符——日本程序员为此头疼了几十年。',
+      xugonggai: (shown, h) => '这件文物里的' + shown + '属于 Big5 的"許功蓋"家族：它的字节 `' + h + '` 第二个字节 `5C` 恰好是反斜杠 `\\`，在程序里经常被当成转义符吞掉。',
+      koi8: (q) => 'KOI8-R 的设计彩蛋：把这件文物原始字节的最高位抹掉，会得到' + q + '——正是俄文的拉丁转写（大小写颠倒）。当年这样设计，是为了让俄文在只认 7 位的网关里也能勉强读懂。',
+      euro: '欧元符号 € 的 UTF-8 是 `E2 82 AC`；在 Windows-1252 里它只占一个字节 `80`——那是 1998 年专门腾出来的位置。',
+      emoji: (shown, h) => 'emoji' + shown + '的 UTF-8 是 `' + h + '`，足足 4 个字节；在 UTF-16 里它需要一对代理项——这正是很多老系统"吃不下"emoji 的原因。',
+      mojibake: '"Mojibake"（文字化け）来自日语：moji 是"文字"，bake 是"变身、妖怪化"——字变成了妖怪。中文叫"乱码"，俄语叫 кракозябры，意思都差不多。',
+      story: (mechanism, lore) => mechanism + lore,
+      sigLine: (title, story, quip) => '**' + title + '**：' + story + quip,
+      sigUnknown: (title, note) => '**' + title + '**：' + note,
+      unknownNote: '一种本馆尚未详细记录的乱码签名。',
+    },
+    thatDecoder: '那个解码器',
+    tag: { layers: (n) => layerWord(n), debug: '调试内存', sig: (t) => '名器：' + t, emoji: 'emoji', repaired: '含修复' },
+    plainHeading: (h) => '【' + h + '】',
+  };
+
+  const ZH = {
+    locale: 'zh-CN',
+    STYLES, LANG_NAMES, LANG_SHORT, REGION_SPEECH, ENCODING_FACTS, PAIR_FACTS, SIGNATURE_FACTS, SCHEMES, VOICES,
+    ESCAPE_SUBTITLES, SCHEME_DESC, TRUE_DESC, TRUE_DESC_BY_ID, STATUS_TAGS,
+    UTF8_SCRIPT_NAMES: UTF8_SCRIPTS.map((s) => s.name),
+    INVISIBLE: { names: INVISIBLE_NAMES, c0: 'C0 控制符', c1: 'C1 控制符', pua: '私用区字符', surrogate: '孤立代理项', space: '空格', invisible: '不可见字符' },
+    SIGNAL_HINTS: null, // zh-CN shows the engine's own (Chinese) hints
+    q: ['「', '」'],
+    paren: (s) => '（' + s + '）',
+    safeChars: { tick: '｀', star: '＊', bom: '〔BOM〕' },
+    t: ZH_T,
+  };
+  L = ZH;
+
+  /* ---------- locale resolution and registration ---------- */
+
+  const PACKS = { 'zh-CN': ZH };
+
+  // A supported tag ('en', ' EN_gb ', 'zh-TW' …) → 'en-US' / 'zh-CN'; anything else → null.
+  // Delegates to MBX.I18n.normalize when present (trimmed first, read at call time); the regex is
+  // the same rule for narrator.js loaded on its own.
+  function tagLocale(tag) {
+    const s = typeof tag === 'string' ? tag.trim() : '';
+    const I = MBX.I18n;
+    if (I && typeof I.normalize === 'function') {
+      try {
+        const id = I.normalize(s);
+        return id === 'en-US' || id === 'zh-CN' ? id : null;
+      } catch (_) { /* fall through */ }
+    }
+    if (/^en(?:[-_]|$)/i.test(s)) return 'en-US';
+    if (/^zh(?:[-_]|$)/i.test(s)) return 'zh-CN';
+    return null;
+  }
+
+  // Pack id for registerLocale: a supported tag; anything else is 'zh-CN' (the base, never replaced).
+  function normLocale(tag) {
+    return tagLocale(tag) || 'zh-CN';
+  }
+
+  // §11.2: the I18n.resolve rule shared with the core modules: a supported explicit tag wins
+  // (opts.locale or a string), anything else follows MBX.I18n's current language, zh-CN without
+  // i18n.js. Read at call time (never cached); a broken I18n falls back to the tag, then zh-CN.
+  function resolveLocale(opts) {
+    const I = MBX.I18n;
+    if (I && typeof I.resolve === 'function') {
+      try {
+        return I.resolve(opts) === 'en-US' ? 'en-US' : 'zh-CN';
+      } catch (_) { /* fall through */ }
+    }
+    const given = tagLocale(typeof opts === 'string' ? opts : opts && typeof opts === 'object' ? opts.locale : null);
+    if (given) return given;
+    try {
+      if (I && typeof I.getLocale === 'function') return tagLocale(I.getLocale()) === 'en-US' ? 'en-US' : 'zh-CN';
+    } catch (_) { /* fall through */ }
+    return 'zh-CN';
+  }
+
+  const packFor = (id) => PACKS[id] || ZH;
+
+  // Runs fn with the pack for `opts` active; the previous pack is restored even if fn throws.
+  function inLocale(opts, fn) {
+    const prev = L;
+    L = packFor(resolveLocale(opts));
+    try { return fn(); } finally { L = prev; }
+  }
+
+  const isPlainObject = (x) => !!x && typeof x === 'object' && !Array.isArray(x);
+
+  function mergeKeyed(base, over) {
+    const out = {};
+    for (const k of Object.keys(base)) out[k] = Object.assign({}, base[k], isPlainObject(over) ? over[k] : null);
+    if (isPlainObject(over)) for (const k of Object.keys(over)) if (!(k in out)) out[k] = over[k];
+    return out;
+  }
+
+  // One level deeper for grouped slots (hooks / identify / closing / wrong / t.era …), so a pack
+  // that omits one group or phrase still falls back entry by entry.
+  function mergeDeep(base, over) {
+    const out = Object.assign({}, base, isPlainObject(over) ? over : null);
+    if (isPlainObject(over)) {
+      for (const k of Object.keys(base)) if (isPlainObject(base[k]) && isPlainObject(over[k])) out[k] = Object.assign({}, base[k], over[k]);
+    }
+    return out;
+  }
+
+  function registerLocale(locale, pack) {
+    if (!isPlainObject(pack)) return false;
+    const id = normLocale(locale);
+    if (id === 'zh-CN') return false; // zh-CN is the built-in base; it is never replaced
+    const p = Object.assign({}, ZH, pack, { locale: id });
+    const styles = Array.isArray(pack.STYLES) ? pack.STYLES : [];
+    p.STYLES = ZH.STYLES.map((s) => {
+      const o = styles.find((x) => x && x.id === s.id);
+      return o ? Object.assign({}, s, o) : s;
+    });
+    for (const k of ['ENCODING_FACTS', 'PAIR_FACTS', 'SIGNATURE_FACTS', 'SCHEMES']) p[k] = mergeKeyed(ZH[k], pack[k]);
+    const voices = {};
+    for (const style of Object.keys(ZH.VOICES)) voices[style] = mergeDeep(ZH.VOICES[style], pack.VOICES && pack.VOICES[style]);
+    p.VOICES = voices;
+    for (const k of ['LANG_NAMES', 'LANG_SHORT', 'REGION_SPEECH', 'SCHEME_DESC', 'TRUE_DESC', 'TRUE_DESC_BY_ID', 'STATUS_TAGS', 'ESCAPE_SUBTITLES', 'safeChars']) {
+      p[k] = Object.assign({}, ZH[k], pack[k]);
+    }
+    p.INVISIBLE = mergeDeep(ZH.INVISIBLE, pack.INVISIBLE);
+    p.UTF8_SCRIPT_NAMES = ZH.UTF8_SCRIPT_NAMES.map((n, i) => (Array.isArray(pack.UTF8_SCRIPT_NAMES) && pack.UTF8_SCRIPT_NAMES[i]) || n);
+    p.t = mergeDeep(ZH_T, pack.t);
+    PACKS[id] = p;
+    return true;
+  }
+
+  function styles(locale) {
+    const pack = packFor(resolveLocale(locale == null ? null : { locale }));
+    return pack.STYLES.map((s) => Object.assign({}, s, { docents: s.docents.slice() }));
   }
 
   /* ======================================================================
@@ -3113,12 +3545,17 @@
    * ==================================================================== */
 
   function narrate(result, opts) {
+    return inLocale(opts, () => narrateIn(result, opts));
+  }
+
+  function narrateIn(result, opts) {
     const o = opts || {};
     const style = VOICES[o.style] ? o.style : 'humor';
     const c = buildContext(result, style, seedValue(o.seed), !!o.strict);
     const H = c.voice.headings;
     const sections = [];
-    const push = (id, text) => { if (text) sections.push({ id, heading: H[id], text }); };
+    const tidy = L.t.tidy || ((s) => s);
+    const push = (id, text) => { if (text) sections.push({ id, heading: H[id], text: tidy(text) }); };
 
     push('opening', buildOpening(c));
     push('identify', buildIdentify(c));
@@ -3132,13 +3569,13 @@
     const title = buildTitle(c);
     const subtitle = buildSubtitle(c);
     const plainText = [title, subtitle, '']
-      .concat(sections.map((s) => '【' + s.heading + '】\n' + plainOf(s.text)).join('\n\n'))
+      .concat(sections.map((s) => L.t.plainHeading(s.heading) + '\n' + plainOf(s.text)).join('\n\n'))
       .join('\n');
     return {
       exhibitId: c.exhibitId,
       title,
       subtitle,
-      era: { label: c.era.label, reason: stripMarkup(c.era.evidence.join('')) },
+      era: { label: c.era.label, reason: stripMarkup(c.era.evidence.join(L.t.sp)) },
       site: c.site,
       tags: buildTags(c),
       sections,
@@ -3150,11 +3587,16 @@
 
   // Compact, JSON-serialisable grounding for the LLM prompt: only facts we can
   // stand behind (real bytes from the analysis + curated history), no prose.
-  function factsFor(result) {
+  function factsFor(result, opts) {
+    return inLocale(opts, () => factsIn(result));
+  }
+
+  function factsIn(result) {
     const c = buildContext(result, 'academic', 0, false);
+    const zh = L === ZH;
     const encFacts = (id) => {
       if (!id) return null;
-      const f = ENCODING_FACTS[id];
+      const f = L.ENCODING_FACTS[id];
       return f ? { id, name: f.name, born: f.bornLabel, story: stripMarkup(f.story) } : { id, name: encName(id), born: null, story: null };
     };
     const layers = c.traces.map((entry) => {
@@ -3203,7 +3645,7 @@
       input: clip(c.input, 300),
       output: c.best ? clip(c.output, 300) : null,
       confidence: c.confidence == null ? null : Math.round(c.confidence * 100) / 100,
-      label: c.best && c.best.label ? String(c.best.label) : null,
+      label: zh ? (c.best && c.best.label ? String(c.best.label) : null) : c.best ? labelOf(c.best, null) : null,
       language: c.lang,
       layers,
       era: { label: c.era.label, start: c.era.start, end: c.era.end, evidence: c.era.evidence.map(stripMarkup) },
@@ -3220,33 +3662,42 @@
       })),
       signatures: c.signatures.map((s) => ({
         id: s.id,
-        title: s.fact ? s.fact.title : String(s.sig.title || s.id),
+        title: s.fact ? s.fact.title : zh ? String(s.sig.title || s.id) : s.title,
         match: s.sig.match == null ? null : String(s.sig.match),
         count: s.count,
-        fact: s.fact ? stripMarkup(s.fact.mechanism) : (s.sig.note ? String(s.sig.note) : null),
+        fact: s.fact ? stripMarkup(s.fact.mechanism) : (s.sig.note && foreignOk(s.sig.note) ? String(s.sig.note) : null),
       })),
       fixRecipe: recipe ? stripMarkup(recipe) : null,
       alternatives: c.alternatives.slice(0, 3).map((a) => ({
-        label: a.label ? String(a.label) : null,
+        label: zh ? (a.label ? String(a.label) : null) : labelOf(a, null),
         output: clip(a.output, 60),
         confidence: isNum(a.confidence) ? Math.round(a.confidence * 100) / 100 : null,
       })),
-      signals: c.signals.slice(0, 5).map((s) => ({ type: s.type || null, match: s.match == null ? null : String(s.match), hint: s.hint || null })),
+      signals: c.signals.slice(0, 5).map((s) => ({ type: s.type || null, match: s.match == null ? null : String(s.match), hint: (zh ? s.hint : hintOf(s)) || null })),
     };
   }
 
   const Narrator = {
     narrate,
     factsFor,
-    ENCODING_FACTS,
+    styles,          // 〔增补〕localized STYLES (ids unchanged)
+    registerLocale,  // 〔增补〕language packs (src/narrator-en.js registers 'en-US')
+    ENCODING_FACTS,  // the zh-CN tables (contract exports; localized copies live in the packs)
     PAIR_FACTS,
     SIGNATURE_FACTS,
     SCHEMES,
     STYLES,
     // exposed for tests and for app.js (e.g. rendering a hex dump consistently)
-    _internals: { fnv1a, mulberry32, hex, safe, stripMarkup, plainOf, utf8Layout, pairFactsFor, leadMeaning, canonicalBytes, VOICES },
+    _internals: {
+      fnv1a, mulberry32, hex, safe, stripMarkup, plainOf, utf8Layout, pairFactsFor, leadMeaning, canonicalBytes, VOICES,
+      tagLocale, normLocale, resolveLocale, packFor, locales: () => Object.keys(PACKS),
+    },
   };
 
   MBX.Narrator = Narrator;
+  // Packs that loaded before this module (or with it absent) wait in MBX._narratorPacks.
+  if (MBX._narratorPacks && typeof MBX._narratorPacks === 'object') {
+    for (const id of Object.keys(MBX._narratorPacks)) registerLocale(id, MBX._narratorPacks[id]);
+  }
   if (typeof module === 'object' && module.exports) module.exports = Narrator;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

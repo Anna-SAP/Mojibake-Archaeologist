@@ -17,6 +17,34 @@
   'use strict';
   const MBX = (root.MBX = root.MBX || {});
 
+  /**
+   * UI language for user-visible text (docs §11.2), by the one rule every module shares:
+   * MBX.I18n.resolve(arg), where arg is a locale string or an options object with `locale`. A
+   * supported tag wins ('en', ' en_US ', 'zh-TW'...); anything else follows the current UI
+   * language. Without src/i18n.js the same tag rule applies and everything else is zh-CN. Read at
+   * call time so a language switch applies to the next call.
+   */
+  function localeOf(arg) {
+    const I18n = MBX.I18n;
+    if (I18n && typeof I18n.resolve === 'function') {
+      try {
+        return I18n.resolve(arg) === 'en-US' ? 'en-US' : 'zh-CN';
+      } catch (_) { /* fall through */ }
+    }
+    // Without I18n.resolve: the I18n.normalize tag rule, then the current language, then zh-CN.
+    const tag = typeof arg === 'string' ? arg : arg && typeof arg === 'object' ? arg.locale : null;
+    const s = typeof tag === 'string' ? tag.trim() : '';
+    if (/^en(?:[-_]|$)/i.test(s)) return 'en-US';
+    if (/^zh(?:[-_]|$)/i.test(s)) return 'zh-CN';
+    if (I18n && typeof I18n.getLocale === 'function') {
+      try {
+        return /^en(?:[-_]|$)/i.test(String(I18n.getLocale()).trim()) ? 'en-US' : 'zh-CN';
+      } catch (_) { /* fall through */ }
+    }
+    return 'zh-CN';
+  }
+  const isEn = (arg) => localeOf(arg) === 'en-US';
+
   // ---------------------------------------------------------------------------
   // 1. Character classes and scripts
   // ---------------------------------------------------------------------------
@@ -758,7 +786,10 @@
   function ensureTables() {
     if (CLS) return;
     const lex = MBX.Lexicon;
-    if (!lex) throw new Error('MBX.Lexicon 未加载：请先引入 src/lexicon.js');
+    if (!lex) {
+      throw new Error(isEn(null) ? 'MBX.Lexicon is not loaded: include src/lexicon.js first'
+        : 'MBX.Lexicon 未加载：请先引入 src/lexicon.js');
+    }
     lex.ready();
     LEX = lex;
     const cls = new Uint8Array(0x10000);
@@ -1283,6 +1314,19 @@
     en: '英语', fr: '法语', de: '德语', es: '西班牙语', pt: '葡萄牙语', it: '意大利语',
     latin: '拉丁字母文本', emoji: '表情符号', mixed: '多语种混合', unknown: '未知',
   };
+  const LANG_NAMES_EN = Object.freeze({
+    'zh-Hans': 'Simplified Chinese', 'zh-Hant': 'Traditional Chinese', ja: 'Japanese', ko: 'Korean', ru: 'Russian',
+    uk: 'Ukrainian', el: 'Greek', he: 'Hebrew', ar: 'Arabic', th: 'Thai', tr: 'Turkish', pl: 'Polish', cs: 'Czech',
+    en: 'English', fr: 'French', de: 'German', es: 'Spanish', pt: 'Portuguese', it: 'Italian',
+    latin: 'Latin script', emoji: 'Emoji', mixed: 'Mixed', unknown: 'Unknown',
+  });
+
+  /** Localized name of a detectLang() code; an unrecognised code comes back as itself. */
+  function langName(code, locale) {
+    if (code == null) return undefined;
+    const table = isEn(locale) ? LANG_NAMES_EN : LANG_NAMES;
+    return Object.prototype.hasOwnProperty.call(table, code) ? table[code] : String(code);
+  }
   const LATIN_LANGS = ['en', 'fr', 'de', 'es', 'pt', 'it', 'pl', 'tr', 'cs'];
   const GROUP_SCRIPT = { latin: 'latin', cyr: 'cyrillic', grk: 'greek', heb: 'hebrew', arab: 'arabic', thai: 'thai', other: 'other', emoji: 'emoji' };
 
@@ -1411,8 +1455,10 @@
     return cp < 0x10000 ? BASE[cp] : astralInfo(cp)[1];
   }
 
-  function detectLang(text) {
-    return decide(scan(text == null ? '' : String(text))).lang;
+  /** -> { lang, name, confidence }; name in the locale of opts.locale (docs §11.2). */
+  function detectLang(text, opts) {
+    const r = decide(scan(text == null ? '' : String(text))).lang;
+    return isEn(opts) ? { lang: r.lang, name: LANG_NAMES_EN[r.lang], confidence: r.confidence } : r;
   }
 
   // ---------------------------------------------------------------------------
@@ -1509,11 +1555,48 @@
     ];
   }
 
+  // en-US hints, keyed by signal type (the zh-CN hint lives on each SIGNAL_DEFS entry).
+  // Quoted strings are specimens of the mojibake itself, not words to translate.
+  const SIGNAL_HINTS_EN = Object.freeze({
+    bom: 'Byte order mark: "ï»¿" is the UTF-8 BOM (EF BB BF) as Windows-1252 reads it; a U+FEFF in the middle of the text means a BOM was pasted in as content',
+    'utf16-bom': 'A UTF-16 byte order mark (FF FE / FE FF) read by a single-byte encoding as "ÿþ" / "þÿ"',
+    'utf8-as-1252': 'The telltale shape of multi-byte text (most often UTF-8) read one byte at a time as Windows-1252 / Latin-1 (e.g. "Ã©", "â€™", "å¤§")',
+    'utf8-as-1251': 'UTF-8 Cyrillic read as Windows-1251 (e.g. "РџСЂРёРІРµС‚"): every Р or С is a UTF-8 lead byte, D0 or D1, in disguise',
+    'utf8-as-mac': 'UTF-8 read as Mac OS Roman (e.g. "caf√©"): √ is what the lead byte C3 looks like in the Mac character set',
+    'sjis-as-1252': 'Shift_JIS Japanese read as Windows-1252 (e.g. "‚±‚ñ‚É‚¿‚Í"): ‚ and ƒ are the lead bytes 82 and 83 of hiragana and katakana',
+    'utf8-as-gbk': 'Fragments that UTF-8 Chinese leaves behind when read as GBK (e.g. "锛", "銆", "鐨"): each three-byte character was split into one and a half GBK characters',
+    'utf8-as-sjis': 'Fragments that UTF-8 text leaves behind when read as Shift_JIS (e.g. "縺", "繧", "繝")',
+    'half-width-kana': 'Half-width katakana: wedged between Chinese characters or mojibake, they are almost always UTF-8 bytes read as Shift_JIS',
+    'cyrillic-case': 'A lowercase Cyrillic letter followed by capitals: when KOI8-R and Windows-1251 misread each other, the letter case flips wholesale',
+    'latin1-run': 'A run of Western accented letters and symbols: probably double-byte text (GBK, Big5, Shift_JIS and the like) read by a single-byte encoding',
+    'cp1254-as-1252': 'Turkish Windows-1254 read as Windows-1252: ı ş ğ came out as ý þ ð (e.g. "görüþmek", "nasýlsýnýz")',
+    'cp1250-as-1252': 'Central European Windows-1250 read as Windows-1252: ą ś ż ł ę ń came out as ¹ œ ¿ ³ ê ñ (e.g. "siê", "Szczêœliwego")',
+    kunjinkao: '"锟斤拷": pairs of UTF-8 replacement characters U+FFFD (EF BF BD) read as GBK; the original text is irreversibly lost',
+    'kunjinkao-big5': '"嚙踝蕭": the Traditional Chinese twin of "锟斤拷", made of the UTF-8 bytes of U+FFFD read as Big5',
+    tangtang: '"烫烫烫": MSVC debug builds fill uninitialized stack memory with 0xCC, and 0xCCCC in GBK is exactly "烫"',
+    tuntun: '"屯屯屯": MSVC debug builds fill uninitialized heap memory with 0xCD, and 0xCDCD in GBK is exactly "屯"',
+    fffd: 'Replacement character U+FFFD (\uFFFD): a decoder hit invalid bytes and swapped them for this placeholder; the original bytes are gone',
+    c1: 'C1 control characters (U+0080–U+009F): usually ISO-8859-1 letting UTF-8 continuation bytes or Windows-1252 symbols through as raw codes',
+    control: 'Control characters: typical of UTF-16 text read as a single-byte encoding (every other byte is 00)',
+    pua: 'Private Use Area characters: typical of a misread GBK user-defined area or Big5 custom-character area',
+    'question-marks': 'Runs of question marks: the text was converted to a character set that could not hold it and every misfit became "?"; the original is irreversibly lost',
+  });
+
+  /** Localized hint for a mojibake signal type (undefined for an unknown type). */
+  function signalHint(type, locale) {
+    if (isEn(locale)) return SIGNAL_HINTS_EN[type];
+    ensureSignals();
+    const def = SIGNAL_DEFS.find((d) => d.type === type);
+    return def ? def.hint : undefined;
+  }
+
   const MAX_SIGNALS = 200;
 
-  function mojibakeSignals(text) {
+  /** -> [{ type, match, index, hint }]; hint in the locale of opts.locale (docs §11.2). */
+  function mojibakeSignals(text, opts) {
     text = text == null ? '' : String(text);
     ensureSignals();
+    const en = isEn(opts);
     const out = [];
     const found = new Set();
     for (const def of SIGNAL_DEFS) {
@@ -1522,7 +1605,7 @@
       const hits = [];
       let m;
       while ((m = def.re.exec(text)) && hits.length < MAX_SIGNALS) {
-        hits.push({ type: def.type, match: m[0], index: m.index, hint: def.hint });
+        hits.push({ type: def.type, match: m[0], index: m.index, hint: en ? SIGNAL_HINTS_EN[def.type] : def.hint });
         if (m[0] === '') def.re.lastIndex++;
       }
       if (hits.length && hits.length >= (def.minCount || 1)) {
@@ -1540,6 +1623,10 @@
     detectLang,
     mojibakeSignals,
     LANG_NAMES,
+    LANG_NAMES_EN,
+    SIGNAL_HINTS_EN,
+    langName,
+    signalHint,
     /** Builds the lookup tables now (they are otherwise built on first use). */
     ready() { ensureTables(); ensureSignals(); return true; },
   };

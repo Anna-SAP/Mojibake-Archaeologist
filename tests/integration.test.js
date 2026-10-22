@@ -16,7 +16,8 @@ const ROOT = path.join(__dirname, '..');
 const App = require(path.join(ROOT, 'src', 'app.js'));
 
 // docs/ARCHITECTURE.md §0: classic scripts, loaded in this order.
-const SCRIPT_ORDER = ['lexicon', 'codecs', 'scorer', 'forge', 'engine', 'narrator', 'llm', 'app'];
+// i18n.js comes first and the en-US docent pack right after the narrator (§11).
+const SCRIPT_ORDER = ['i18n', 'lexicon', 'codecs', 'scorer', 'forge', 'engine', 'narrator', 'narrator-en', 'llm', 'app'];
 const STATUSES = ['restored', 'clean', 'irrecoverable', 'partial', 'unknown'];
 const SECTION_IDS = ['opening', 'identify', 'mechanism', 'dating', 'repair', 'conservation', 'easter', 'closing'];
 const LEAKS = /undefined|NaN|\[object Object\]/;
@@ -146,7 +147,7 @@ test('integration: src files are classic scripts that never fetch local data', (
 });
 
 test('integration: every MBX module named in the contract is loaded', () => {
-  for (const name of ['Lexicon', 'Codecs', 'Scorer', 'Forge', 'Engine', 'Narrator', 'LLM', 'App']) {
+  for (const name of ['I18n', 'Lexicon', 'Codecs', 'Scorer', 'Forge', 'Engine', 'Narrator', 'LLM', 'App']) {
     assert.ok(MBX[name], `MBX.${name} is defined`);
   }
   assert.equal(MBX.App, App, 'app.js registers MBX.App and module.exports alike');

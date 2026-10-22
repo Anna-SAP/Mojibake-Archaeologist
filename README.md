@@ -14,6 +14,26 @@
 
 ---
 
+## English
+
+**Mojibake Archaeologist** treats garbled text as an archaeological find. Paste mojibake such as `å¤§å®¶å¥½` or `Donâ€™t`,
+and the museum digs through the strata of misread bytes, restores the original text, draws a byte-by-byte Stratigraphy of Bytes,
+and lets a docent (Humorous, Academic, or Snarky) explain how, when, and where the text got mangled, citing the relic's own bytes.
+Zero build, zero dependencies, no backend: everything runs in your browser.
+
+- **Live demo in English:** <https://anna-sap.github.io/Mojibake-Archaeologist/?lang=en-US>
+- **Quick start:** open `index.html` directly, or run `node tools/serve.js 8765` (Node ≥ 18) and visit <http://localhost:8765/?lang=en-US>.
+  Paste mojibake into the Excavation Site and press **Start Digging** (Ctrl/⌘ + Enter), or click an exhibit under Highlights of the Collection.
+- **Language switch:** the `EN / ZH` toggle in the top-left corner of the header (also in Museum Settings) switches the whole experience
+  between US English and Simplified Chinese: interface, exhibits and forgery presets, the built-in docent's narration, the Markdown report,
+  and the audio-tour voice. The optional AI docent answers in the language you picked. Your data (the mojibake, the restored text, the byte grids)
+  is never translated. The choice is remembered in this browser; `?lang=en-US` or `?lang=zh-CN` opens the page in that language
+  for one visit without changing the saved choice, and share links never carry a language.
+
+The rest of this README is in Chinese. The i18n API is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §11.
+
+---
+
 ## 快速开始 · Quick start
 
 **方式一：双击打开**
@@ -57,6 +77,11 @@ node tools/serve.js 8765
 | **赝品工坊** | 反过来造乱码：输入正常文字，选一个预设（24 种经典事故），或者自己叠 1–3 层「原编码 → 误读为」，还可以模拟复制粘贴时丢失不可见字节、NBSP 变成普通空格。生成后一键「送去鉴定」。 |
 | **我的展柜** | 最近 20 次鉴定记录（只存在本机浏览器的 localStorage 里），点击可重新打开，也可以一键清空。 |
 | **分享链接** | 「复制分享链接」会把输入放进网址的 `#q=…`，打开链接即自动发掘。超过 2000 字的输入不写进地址栏；打开超过 20000 字的链接时只填入输入框，不会自动开挖。 |
+
+**界面语言 EN / ZH**：页眉左上角的 `EN / ZH` 切换器（「馆务设置」抽屉里也有一组）可以把整个体验在简体中文与美国英语之间切换：
+界面文案、馆藏精选与赝品配方、讲解员的完整讲解、鉴定报告、语音导览的语音都会换语言，AI 讲解员也会改用所选语言作答；
+乱码、还原出的原文、字节网格等数据永远原样显示，不会被翻译。选择会记在这个浏览器里，下次打开仍是这个语言；
+网址加上 `?lang=en-US`（或 `?lang=zh-CN`）可以直接用指定语言打开，只影响这一次，不改动已保存的选择；分享链接不会带上语言。
 
 另外还有明暗两套主题（夜间展厅 / 羊皮纸展签），手机上可用（375px 宽也不会横向滚动），全部操作支持键盘，开启"减少动态效果"时会跳过动画。
 
@@ -169,6 +194,8 @@ node tools/serve.js 8765
 - 浏览器直连要求端点**允许 CORS**。本地 Ollama 需要用 `OLLAMA_ORIGINS=*`（或你的页面来源）启动；不允许跨域的端点会连接失败，界面会提示可能是 CORS 拦截。
 - **任何失败**（网络、CORS、鉴权、限流、拒答、空响应……）都会自动换回馆内讲解员，并告诉你原因。
 - AI 收到的是一份精简的 JSON 鉴定档案，包括链路、字节对照、修复、签名和核实过的史实。提示词要求它只引用档案里的字节和链路，不得编造。
+- AI 讲解员用界面语言作答：英文界面下提示词是英文，并要求用美式英语讲解（乱码与原文照抄，不翻译）。切换语言时，正在进行的 AI 讲解会按新语言重新开始；
+  已经讲完的不会自动重新请求（以免消耗额度），改由馆内讲解员用新语言讲解（「AI 讲解员」开关随之关上），重新打开开关即可让 AI 用新语言重讲。
 - 「清除 AI 设置与密钥」只重置 AI 相关设置，其他偏好不受影响。
 
 ---
@@ -179,8 +206,19 @@ node tools/serve.js 8765
 
 ```js
 // Node：按顺序加载（浏览器里 index.html 已经加载好了）
-for (const m of ['lexicon', 'codecs', 'scorer', 'forge', 'engine', 'narrator', 'llm']) require(`./src/${m}.js`);
-const { Engine, Forge, Narrator, LLM } = globalThis.MBX;
+for (const m of ['i18n', 'lexicon', 'codecs', 'scorer', 'forge', 'engine', 'narrator', 'narrator-en', 'llm']) require(`./src/${m}.js`);
+const { Engine, Forge, Narrator, LLM, I18n } = globalThis.MBX;
+```
+
+返回界面文字的函数都接受可选的 `locale`（`'zh-CN'` / `'en-US'`）；不传时跟随 `MBX.I18n.getLocale()`（在 Node 里默认 `'zh-CN'`）。
+搜索本身与语言无关，两种语言下的输出、链路、分数和置信度完全相同，只有文字不同：
+
+```js
+const en = MBX.Engine.analyze('浣犲ソ锛屼笘鐣�', { locale: 'en-US' });
+en.best.label;                                                   // 'UTF-8 misread as GBK, 1 gap repaired'
+MBX.Narrator.narrate(en, { style: 'snark', seed: 3, locale: 'en-US' }).title;
+                                                                 // 'UTF-8 · Simplified Chinese Misreading · Single Stratum'
+MBX.I18n.setLocale('en-US');   // 之后不传 locale 的调用都用英文
 ```
 
 **鉴定一段乱码：`MBX.Engine.analyze`**
@@ -239,11 +277,15 @@ MBX.LLM.registerProvider('my-proxy', {
 ## 测试 · Tests
 
 ```bash
-node tests/run.js            # 全部测试（17 个文件、255 项，约 1 分钟）
+node tests/run.js            # 全部测试（26 个文件、366 项，约 1 分钟）
 node tests/run.js engine     # 只跑文件名包含 "engine" 的测试
 ```
 
 `tests/corpus.test.js` 会打印很多 `[corpus] FAIL …` 行，那是准确率诊断（列出没有完全还原的个案），**不是测试失败**。最后一行的 `N passed, 0 failed` 才是结果。
+
+`node tests/run.js i18n` 只跑界面语言相关的测试：英文输出里除数据外不得出现中日韩文字（`i18n-leak`）、切换流程（`i18n-switch`）、
+各模块对语言标签的取值一致（`i18n-locale-matrix`），以及 zh-CN 输出逐字不变（`i18n-zh-golden`；有意修改中文输出后用
+`node tests/i18n-zh-golden.test.js --write` 重新生成）。
 
 语料基准（55 段多语种原文 × 40 种事故 = 1454 个个案）当前成绩：
 
@@ -262,12 +304,14 @@ node tests/run.js engine     # 只跑文件名包含 "engine" 的测试
 ```
 index.html            单页入口
 assets/styles.css     全部样式（明暗主题）
+src/i18n.js           MBX.I18n      界面语言（zh-CN / en-US）：检测、切换、界面词典
 src/lexicon.js        MBX.Lexicon   字频、字表与汉字分层
 src/codecs.js         MBX.Codecs    21 种编码的逐字节编解码、字节对齐分段、带缺口 UTF-8 修复解码
 src/scorer.js         MBX.Scorer    可读性评分、语言检测、乱码特征
 src/forge.js          MBX.Forge     乱码伪造器、预设、馆藏精选
 src/engine.js         MBX.Engine    还原搜索引擎
 src/narrator.js       MBX.Narrator  模板讲解员与编码史实知识库
+src/narrator-en.js                  讲解员的美国英语语言包（en-US）
 src/llm.js            MBX.LLM       可选 AI 讲解员
 src/app.js            MBX.App       界面
 tools/serve.js        零依赖本地静态服务器
@@ -295,7 +339,7 @@ docs/ARCHITECTURE.md  模块接口合同
 - 唯一的默认外部请求是从 `fonts.googleapis.com` / `fonts.gstatic.com` 加载字体。离线或被拦截时会回落到系统字体，功能不受影响。
 - 只有当你启用 AI 讲解员时，鉴定档案（含输入文字的前 300 字左右）才会发往你配置的端点。
 - 分享链接把文字放在网址的 `#q=` 片段里。片段不会随 HTTP 请求发给服务器，但拿到链接的人、以及你的浏览器历史，都能看到这段文字。
-- 本机存储：`mbx.prefs`（偏好）、`mbx.history`（最近 20 次输入），以及你选择保存的 AI 设置。可以在「我的展柜」和设置里清除。
+- 本机存储：`mbx.prefs`（偏好，含界面语言）、`mbx.history`（最近 20 次输入），以及你选择保存的 AI 设置。可以在「我的展柜」和设置里清除。
 
 ---
 
@@ -312,4 +356,4 @@ docs/ARCHITECTURE.md  模块接口合同
 - **随机二进制**：把几十 KB 的随机字节当成 Windows-1252 粘进来，可能在约 2 秒后得到一个奇怪的"局部修复"。
 - **依赖浏览器的解码器**：码表来自当前浏览器的 `TextDecoder`，极少数边角字符在不同浏览器版本间可能不同。
 - **AI 讲解员**：端点必须允许浏览器跨域（CORS）。勾选「记住密钥」后，能使用这个浏览器配置文件的人都能读到密钥，请不要在公用电脑上勾选。
-- **语音导览**依赖浏览器的 speechSynthesis：不支持时按钮隐藏；系统没有中文语音时，朗读效果取决于浏览器的默认语音。
+- **语音导览**依赖浏览器的 speechSynthesis：不支持时按钮隐藏；按界面语言选用中文或英文语音，系统没有对应语音时，朗读效果取决于浏览器的默认语音。

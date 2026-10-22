@@ -3,8 +3,12 @@
  *
  * Binds the page in index.html to the MBX.* modules described in docs/ARCHITECTURE.md.
  * Every dependency is looked up at call time (never at load time) because the modules are
- * plain classic scripts that may be missing or broken; the UI degrades with a Chinese notice
- * instead of crashing.
+ * plain classic scripts that may be missing or broken; the UI degrades with a notice instead
+ * of crashing.
+ *
+ * Interface language (docs/ARCHITECTURE.md §11): every visible string comes from the MBX.I18n
+ * dictionaries through tr(); the pure helpers take an optional trailing `locale` (or
+ * opts.locale) and otherwise use the current I18n locale, read at call time.
  *
  * Layout of this file:
  *   1. Pure helpers (no DOM)  — exported as MBX.App.util so Node can test them.
@@ -20,8 +24,54 @@
 
   const mod = (name) => (root.MBX && root.MBX[name]) || null;
 
+  // ---------- interface language ----------
+
+  function normLocale(tag) {
+    const I18n = mod('I18n');
+    if (I18n && typeof I18n.normalize === 'function') return I18n.normalize(tag);
+    const s = typeof tag === 'string' ? tag.trim() : '';
+    if (/^zh(?:[-_]|$)/i.test(s)) return 'zh-CN';
+    if (/^en(?:[-_]|$)/i.test(s)) return 'en-US';
+    return null;
+  }
+
+  // An explicit locale wins; otherwise the current I18n locale; zh-CN when i18n.js is absent.
+  function currentLocale(locale) {
+    const given = locale == null ? null : normLocale(locale);
+    if (given) return given;
+    const I18n = mod('I18n');
+    try {
+      if (I18n && typeof I18n.getLocale === 'function') return normLocale(I18n.getLocale()) || 'zh-CN';
+    } catch (_) { /* fall through */ }
+    return 'zh-CN';
+  }
+
+  /*
+   * UI dictionary lookup (src/i18n.js). Without i18n.js there is no dictionary: the Chinese tables
+   * this file still carries answer for the verdict and escape-scheme names (the language is zh-CN
+   * then, docs §11.2), and any other key comes back as itself.
+   */
+  function tr(key, params, locale) {
+    const I18n = mod('I18n');
+    if (!I18n || typeof I18n.t !== 'function') return builtinZh(key);
+    return I18n.t(key, params, locale == null ? undefined : currentLocale(locale));
+  }
+
+  function builtinZh(key) {
+    const m = /^status\.(\w+)\.(label|headline|desc)$/.exec(key) || /^scheme\.(.+)$/.exec(key);
+    if (!m) return key;
+    if (m[2]) {
+      const table = m[1] === 'partialClean' ? PARTIAL_CLEAN_COPY : has(STATUS_COPY, m[1]) ? STATUS_COPY[m[1]] : null;
+      return table ? table[m[2]] : key;
+    }
+    return has(SCHEME_NAMES, m[1]) ? SCHEME_NAMES[m[1]] : key;
+  }
+
+  const isEnglish = (locale) => currentLocale(locale) === 'en-US';
+
   const STATUSES = ['restored', 'clean', 'irrecoverable', 'partial', 'unknown'];
 
+  // Chinese tables kept as exports for compatibility; the UI reads src/i18n.js (same zh text).
   const STATUS_COPY = {
     restored: {
       label: '已复原',
@@ -76,24 +126,22 @@
     'html-entity': 'HTML 实体（&#…;）',
   };
 
-  const REPAIR_REASONS = {
-    gap: '缺口补全',
-    nbsp: 'NBSP 被降级成空格，已复原',
-    dropped: '被吞掉的字节已补全',
-  };
+  const REPAIR_REASONS = ['gap', 'nbsp', 'dropped'];
 
-  const AI_ERROR_COPY = {
-    config: 'AI 讲解员的设置还不完整（缺少密钥、端点或模型）',
-    auth: 'API 密钥无效，或没有调用该模型的权限',
-    network: '网络连接失败，没能联络上 AI 讲解员',
-    cors: '浏览器的跨域限制拦下了请求（该端点可能不允许网页直接调用）',
-    rate_limit: '请求太频繁，被服务方限流了',
-    overloaded: 'AI 服务当前过载',
-    refusal: 'AI 讲解员婉拒了讲解这件展品',
-    http: 'AI 服务返回了错误',
-    aborted: 'AI 讲解已停止',
-    bad_response: 'AI 服务的回复无法解析',
-  };
+  // LLMError codes with their own fallback copy (ai.err.<code> in src/i18n.js).
+  const AI_ERROR_CODES = ['config', 'auth', 'network', 'cors', 'rate_limit', 'overloaded', 'refusal', 'http', 'aborted', 'bad_response'];
+
+  const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
+  // Status copy in one locale: { label, headline, desc } (status 'partialClean' = PARTIAL_CLEAN_COPY).
+  function copyFor(status, locale) {
+    const s = status === 'partialClean' ? status : normalizeStatus(status);
+    return {
+      label: tr(`status.${s}.label`, null, locale),
+      headline: tr(`status.${s}.headline`, null, locale),
+      desc: tr(`status.${s}.desc`, null, locale),
+    };
+  }
 
   // Used only when MBX.Codecs is unavailable, so the forge selects and labels still make sense.
   const FALLBACK_ENCODINGS = [
@@ -107,19 +155,31 @@
   const FALLBACK_ENC_NAMES = Object.fromEntries(FALLBACK_ENCODINGS.concat([['ascii', 'ASCII']]));
 
   const FALLBACK_STYLES = [
-    { id: 'humor', name: '幽默讲解员', avatar: '🧑‍🏫' },
-    { id: 'academic', name: '学术讲解员', avatar: '👩‍🔬' },
-    { id: 'snark', name: '毒舌讲解员', avatar: '🦉' },
+    { id: 'humor', avatar: '🧑‍🏫' },
+    { id: 'academic', avatar: '👩‍🔬' },
+    { id: 'snark', avatar: '🦉' },
   ];
+
+  function fallbackStyles(locale) {
+    return FALLBACK_STYLES.map((s) => Object.assign({}, s, { name: tr(`style.${s.id}`, null, locale) }));
+  }
 
   // Two relics verified byte-for-byte with TextDecoder when this file was written; shown only if
   // MBX.Forge.GALLERY is missing so the page is never completely empty.
   const FALLBACK_GALLERY = [
-    { id: 'fallback-utf8-1252', title: '西欧误读 · 大家好', relic: 'å¤§å®¶å¥½', expect: '大家好', blurb: 'UTF-8 字节被 Windows-1252 逐字节读出的经典款。' },
-    { id: 'fallback-gbk-1252', title: 'GBK 遇上西欧解码器', relic: 'ÄãºÃ', expect: '你好', blurb: 'GBK 双字节被拆成两个西欧字母。' },
+    { id: 'fallback-utf8-1252', key: 'fb1', relic: 'å¤§å®¶å¥½', expect: '大家好' },
+    { id: 'fallback-gbk-1252', key: 'fb2', relic: 'ÄãºÃ', expect: '你好' },
   ];
 
+  function fallbackGallery(locale) {
+    return FALLBACK_GALLERY.map((g) => ({
+      id: g.id, relic: g.relic, expect: g.expect,
+      title: tr(`gallery.${g.key}.title`, null, locale), blurb: tr(`gallery.${g.key}.blurb`, null, locale),
+    }));
+  }
+
   const DEFAULT_PREFS = {
+    // lang: 'zh-CN' | 'en-US' — only present once the visitor picked a language.
     style: '',
     animation: true,
     voice: true,
@@ -221,8 +281,8 @@
     return `MBX-2026-${hashString(input).slice(4)}`;
   }
 
-  function encName(id) {
-    if (!id) return '未知编码';
+  function encName(id, locale) {
+    if (!id) return tr('enc.unknown', null, locale);
     const Codecs = mod('Codecs');
     try {
       const info = Codecs && typeof Codecs.get === 'function' ? Codecs.get(id) : null;
@@ -231,32 +291,34 @@
     return FALLBACK_ENC_NAMES[id] || String(id);
   }
 
-  function schemeName(scheme) {
-    return SCHEME_NAMES[scheme] || (scheme ? String(scheme) : '转义');
+  function schemeName(scheme, locale) {
+    if (scheme && has(SCHEME_NAMES, scheme)) return tr(`scheme.${scheme}`, null, locale);
+    return scheme ? String(scheme) : tr('scheme.fallback', null, locale);
   }
 
   /*
    * Invisible or ambiguous characters get a visible stand-in in the byte grid; otherwise a
    * C1 control such as U+0081 (the byte that Windows-1252 cannot show) would be an empty box.
    */
-  function displayChar(ch) {
+  function displayChar(ch, locale) {
     const s = String(ch == null ? '' : ch);
-    if (!s) return { text: '∅', kind: 'ctl', title: '空' };
+    if (!s) return { text: '∅', kind: 'ctl', title: tr('char.empty', null, locale) };
     const cp = s.codePointAt(0);
     const u = 'U+' + cp.toString(16).toUpperCase().padStart(4, '0');
-    if (cp === 0x20) return { text: '␠', kind: 'space', title: `空格 ${u}` };
-    if (cp === 0xa0) return { text: 'NBSP', kind: 'space', title: `不换行空格 ${u}` };
-    if (cp === 0x09) return { text: '⇥', kind: 'space', title: `制表符 ${u}` };
-    if (cp === 0x0a) return { text: '↵', kind: 'space', title: `换行 ${u}` };
-    if (cp === 0x0d) return { text: '␍', kind: 'space', title: `回车 ${u}` };
-    if (cp < 0x20 || cp === 0x7f) return { text: hexByte(cp), kind: 'ctl', title: `控制符 ${u}` };
+    const title = (key) => tr(key, { u }, locale);
+    if (cp === 0x20) return { text: '␠', kind: 'space', title: title('char.space') };
+    if (cp === 0xa0) return { text: 'NBSP', kind: 'space', title: title('char.nbsp') };
+    if (cp === 0x09) return { text: '⇥', kind: 'space', title: title('char.tab') };
+    if (cp === 0x0a) return { text: '↵', kind: 'space', title: title('char.lf') };
+    if (cp === 0x0d) return { text: '␍', kind: 'space', title: title('char.cr') };
+    if (cp < 0x20 || cp === 0x7f) return { text: hexByte(cp), kind: 'ctl', title: title('char.ctl') };
     if (cp >= 0x80 && cp <= 0x9f) {
-      return { text: hexByte(cp), kind: 'ctl', title: `C1 控制符 ${u}（通常不可见，复制粘贴时极易丢失）` };
+      return { text: hexByte(cp), kind: 'ctl', title: title('char.c1') };
     }
-    if (cp === 0xad) return { text: 'SHY', kind: 'ctl', title: `软连字符 ${u}` };
-    if (cp === 0xfeff) return { text: 'BOM', kind: 'ctl', title: `字节顺序标记 ${u}` };
-    if ((cp >= 0x200b && cp <= 0x200f) || cp === 0x2060) return { text: 'ZW', kind: 'ctl', title: `零宽字符 ${u}` };
-    if (/^\p{M}/u.test(s)) return { text: '◌' + s, kind: 'normal', title: `组合符号 ${u}` };
+    if (cp === 0xad) return { text: 'SHY', kind: 'ctl', title: title('char.shy') };
+    if (cp === 0xfeff) return { text: 'BOM', kind: 'ctl', title: title('char.bom') };
+    if ((cp >= 0x200b && cp <= 0x200f) || cp === 0x2060) return { text: 'ZW', kind: 'ctl', title: title('char.zw') };
+    if (/^\p{M}/u.test(s)) return { text: '◌' + s, kind: 'normal', title: title('char.mark') };
     return { text: s, kind: 'normal', title: u };
   }
 
@@ -490,20 +552,22 @@
     return nodes;
   }
 
-  function stepTitle(step) {
+  function stepTitle(step, locale) {
     if (!step) return '';
     if (step.kind === 'unescape') {
-      return step.trueEncoding ? `${schemeName(step.scheme)} · 字节按 ${encName(step.trueEncoding)} 解读` : schemeName(step.scheme);
+      return step.trueEncoding
+        ? tr('step.unescapeAs', { scheme: schemeName(step.scheme, locale), enc: encName(step.trueEncoding, locale) }, locale)
+        : schemeName(step.scheme, locale);
     }
-    return `${encName(step.trueEncoding)} 被误读为 ${encName(step.wrongDecoder)}`;
+    return tr('step.misread', { from: encName(step.trueEncoding, locale), to: encName(step.wrongDecoder, locale) }, locale);
   }
 
-  function chainSentence(steps) {
+  function chainSentence(steps, locale) {
     const nodes = forwardChain(steps);
     if (!nodes.length) return '';
     return nodes.map((n) => (n.kind === 'escape'
-      ? `写成${schemeName(n.scheme)}`
-      : `${encName(n.from)} 被误读为 ${encName(n.to)}`)).join('，再');
+      ? tr('chain.escape', { scheme: schemeName(n.scheme, locale) }, locale)
+      : tr('step.misread', { from: encName(n.from, locale), to: encName(n.to, locale) }, locale))).join(tr('chain.join', null, locale));
   }
 
   /*
@@ -609,11 +673,54 @@
     return parts.join('\n\n');
   }
 
+  /*
+   * English pieces are joined with a space and cut at word boundaries. A sentence ends at . ! ? ;
+   * followed by a space or the end of a line, so "PHP 5.4" and "s.encode(" stay whole. Every line
+   * is spoken, including titles, headings and list items without final punctuation; those get a
+   * full stop so the voice pauses instead of running them into the next line.
+   */
+  const EN_SENTENCE = /(?:[^.!?;\n]|[.!?;]+(?=[^\s.!?;]))+(?:[.!?;]+|$)|\n+/gm;
+  const EN_ENDS_SENTENCE = /[.!?;:,…]["'”’)\]]*$/;
+
+  function splitForSpeechEnglish(clean, limit) {
+    const sentences = (clean.match(EN_SENTENCE) || [clean])
+      .map((piece) => piece.trim())
+      .filter(Boolean)
+      .map((piece) => (EN_ENDS_SENTENCE.test(piece) ? piece : `${piece}.`));
+    const chunks = [];
+    let cur = '';
+    const cut = (piece) => {
+      const head = safeSlice(piece, limit);
+      const space = head.lastIndexOf(' ');
+      return space > limit / 2 ? head.slice(0, space) : head;
+    };
+    for (let piece of sentences) {
+      piece = piece.trim();
+      if (!piece) continue;
+      while (piece.length > limit) {
+        if (cur) { chunks.push(cur); cur = ''; }
+        const head = cut(piece);
+        chunks.push(head.trim());
+        piece = piece.slice(head.length).trim();
+      }
+      if (!piece) continue;
+      if (cur && (cur + ' ' + piece).length > limit) {
+        chunks.push(cur);
+        cur = piece;
+      } else {
+        cur = cur ? `${cur} ${piece}` : piece;
+      }
+    }
+    if (cur) chunks.push(cur);
+    return chunks;
+  }
+
   // Splits long text at sentence boundaries; some engines stop speaking after ~15 s per utterance.
-  function splitForSpeech(text, max) {
+  function splitForSpeech(text, max, locale) {
     const limit = max || 160;
     const clean = stripMarkup(text).replace(/[ \t]+/g, ' ').trim();
     if (!clean) return [];
+    if (isEnglish(locale)) return splitForSpeechEnglish(clean, limit);
     const sentences = clean.match(/[^。！？!?；;\n]+[。！？!?；;]*|\n+/g) || [clean];
     const chunks = [];
     let cur = '';
@@ -652,8 +759,19 @@
     return null;
   }
 
+  // Removes the ?lang= parameter: a share link never imposes the sender's interface language.
+  function stripLangParam(url) {
+    const s = String(url || '');
+    const q = s.indexOf('?');
+    if (q < 0) return s;
+    const hashAt = s.indexOf('#', q);
+    const query = s.slice(q + 1, hashAt < 0 ? s.length : hashAt);
+    const kept = query.split('&').filter((p) => p && !/^lang(?:=|$)/i.test(p));
+    return s.slice(0, q) + (kept.length ? `?${kept.join('&')}` : '') + (hashAt < 0 ? '' : s.slice(hashAt));
+  }
+
   function buildShareUrl(href, input) {
-    const base = String(href || '').split('#')[0];
+    const base = stripLangParam(String(href || '').split('#')[0]);
     return `${base}#q=${encodeURIComponent(String(input || ''))}`;
   }
 
@@ -662,29 +780,41 @@
     return String(text == null ? '' : text).length <= HASH_AUTORUN_MAX;
   }
 
-  const FALLBACK_SUFFIX = '已换回馆内讲解员。';
-
   /*
-   * LLMError messages from llm.js are already complete Chinese sentences, so they are shown as is
-   * (trailing full stop and any "已改由馆内模板讲解员解说" clause removed) instead of being wrapped in
-   * another sentence. AI_ERROR_COPY is only the fallback for errors without a message.
+   * LLMError messages from llm.js are already complete sentences in the current language, so they
+   * are shown as is (trailing full stop and any "已改由馆内模板讲解员解说" / "the built-in docent
+   * takes over" clause removed) instead of being wrapped in another sentence. The ai.err.<code>
+   * copy is only the fallback for errors without a message.
    */
-  function aiErrorMessage(err) {
+  function aiErrorCore(msg, english) {
+    if (english) {
+      return msg
+        .replace(/(?:[\s,;:—–-]+|\.\s+)[^.;,—–]*\b(?:built-in|in-house|template)\b[^.;]*\bdocents?\b[^.;]*[.!]*\s*$/i, '')
+        .replace(/[\s.!。]+$/, '')
+        .replace(/[.。]+\s*(?=[)）])/g, '');
+    }
+    return msg
+      .replace(/[，,；;]?\s*已?改由馆内(?:模板)?讲解员(?:解说|讲解)?[。．.！!]*\s*$/, '')
+      .replace(/[\s。．.！!]+$/, '')
+      // "（…。）" → "（…）", so the sentence does not end in "。）。".
+      .replace(/[。．]+\s*(?=[）)])/g, '');
+  }
+
+  function aiErrorMessage(err, locale) {
+    const loc = currentLocale(locale);
+    const english = loc === 'en-US';
+    const suffix = tr('ai.err.suffix', null, loc);
     const msg = err && err.message ? String(err.message).trim() : '';
     if (err && err.name === 'LLMError' && msg) {
-      const core = msg
-        .replace(/[，,；;]?\s*已?改由馆内(?:模板)?讲解员(?:解说|讲解)?[。．.！!]*\s*$/, '')
-        .replace(/[\s。．.！!]+$/, '')
-        // "（…。）" → "（…）", so the sentence does not end in "。）。".
-        .replace(/[。．]+\s*(?=[）)])/g, '');
-      if (core) return `${truncate(core, 200)}。${FALLBACK_SUFFIX}`;
+      const core = aiErrorCore(msg, english);
+      if (core) return tr('ai.err.withCore', { core: truncate(core, 200), suffix }, loc);
     }
     const code = err && err.code;
-    const base = AI_ERROR_COPY[code] || 'AI 讲解员临时缺席';
-    const status = err && err.status ? `（HTTP ${err.status}）` : '';
-    const plain = msg.replace(/[\s。．.！!]+$/, '');
-    const detail = plain && plain !== base ? `：${truncate(plain, 160)}` : '';
-    return `${base}${status}${detail}。${FALLBACK_SUFFIX}`;
+    const base = tr(AI_ERROR_CODES.includes(code) ? `ai.err.${code}` : 'ai.err.default', null, loc);
+    const status = err && err.status ? tr('ai.err.status', { status: err.status }, loc) : '';
+    const plain = msg.replace(english ? /[\s.!。]+$/ : /[\s。．.！!]+$/, '');
+    const detail = plain && plain !== base ? tr('ai.err.detail', { detail: truncate(plain, 160) }, loc) : '';
+    return tr('ai.err.compose', { base, status, detail, suffix }, loc);
   }
 
   // Failures that will repeat on every dig until the visitor changes something.
@@ -701,7 +831,8 @@
     const p = raw && typeof raw === 'object' ? raw : {};
     const e = p.engine && typeof p.engine === 'object' ? p.engine : {};
     const depth = Number(e.maxDepth);
-    return {
+    const lang = normLocale(p.lang);
+    const out = {
       style: typeof p.style === 'string' ? p.style : DEFAULT_PREFS.style,
       animation: p.animation !== false,
       voice: p.voice !== false,
@@ -714,6 +845,8 @@
         allowPartial: e.allowPartial !== false,
       },
     };
+    if (lang) out.lang = lang;
+    return out;
   }
 
   function normalizeResult(r, input) {
@@ -727,6 +860,60 @@
       signals: Array.isArray(src.signals) ? src.signals.filter(Boolean) : [],
       stats: src.stats && typeof src.stats === 'object' ? src.stats : {},
     });
+  }
+
+  /*
+   * The same analysis worded in another language, without searching again: the search is
+   * language-independent (docs §11.3), only label / lang.name / signature title+note / signal
+   * hint / locale change. Each old text is checked against what the engine would have written,
+   * so a result this function cannot reproduce exactly returns null (the caller re-analyzes).
+   */
+  function relabelResult(result, locale) {
+    const Engine = mod('Engine');
+    const Scorer = mod('Scorer');
+    if (!result || typeof result !== 'object') return null;
+    const to = currentLocale(locale);
+    const from = result.locale === 'en-US' || result.locale === 'zh-CN' ? result.locale : null;
+    if (!from) return null;
+    if (from === to) return result;
+    if (!Engine || typeof Engine.chainLabel !== 'function' || typeof Engine.signatures !== 'function'
+      || !Scorer || typeof Scorer.langName !== 'function' || typeof Scorer.signalHint !== 'function') return null;
+    try {
+      const fail = () => { throw new Error('relabel'); };
+      const sigsFrom = new Map(Engine.signatures(from).map((s) => [s.id, s]));
+      const sigsTo = new Map(Engine.signatures(to).map((s) => [s.id, s]));
+      const hyp = (x) => {
+        if (!x || typeof x !== 'object') return x;
+        const steps = Array.isArray(x.steps) ? x.steps : [];
+        const partial = [false, true].find((p) => Engine.chainLabel(steps, { partial: p, locale: from }) === x.label);
+        if (partial === undefined) fail();
+        const out = Object.assign({}, x, { label: Engine.chainLabel(steps, { partial, locale: to }) });
+        if (x.lang && typeof x.lang === 'object') {
+          if (Scorer.langName(x.lang.lang, from) !== x.lang.name) fail();
+          out.lang = Object.assign({}, x.lang, { name: Scorer.langName(x.lang.lang, to) });
+        }
+        return out;
+      };
+      const signatures = (result.signatures || []).map((s) => {
+        const a = sigsFrom.get(s && s.id);
+        const b = sigsTo.get(s && s.id);
+        if (!a || !b || a.title !== s.title || a.note !== s.note) fail();
+        return Object.assign({}, s, { title: b.title, note: b.note });
+      });
+      const signals = (result.signals || []).map((s) => {
+        if (!s || Scorer.signalHint(s.type, from) !== s.hint) fail();
+        return Object.assign({}, s, { hint: Scorer.signalHint(s.type, to) });
+      });
+      return Object.assign({}, result, {
+        best: hyp(result.best),
+        alternatives: (result.alternatives || []).map(hyp),
+        signatures,
+        signals,
+        locale: to,
+      });
+    } catch (_) {
+      return null;
+    }
   }
 
   function hypotheses(result) {
@@ -815,30 +1002,30 @@
    * Badge, headline and description for a view. engineBest is the engine's own best hypothesis
    * (state.result.best), used to name the chief verdict when the visitor adopted another one.
    */
-  function statusCopy(view, engineBest) {
+  function statusCopy(view, engineBest, locale) {
     const v = view || {};
     const status = normalizeStatus(v.status);
     const best = v.best || null;
-    let copy = STATUS_COPY[status];
-    if (status === 'partial' && best && looksFullyRepaired(best.output)) copy = PARTIAL_CLEAN_COPY;
+    let copy = copyFor(status, locale);
+    if (status === 'partial' && best && looksFullyRepaired(best.output)) copy = copyFor('partialClean', locale);
     if (v.promotedFrom != null && best) {
       const chief = engineBest && typeof engineBest.output === 'string'
-        ? `首席结论仍是「${truncate(engineBest.output, 40)}」`
-        : '引擎本身没有给出首席结论';
+        ? tr('promoted.chief', { output: truncate(engineBest.output, 40) }, locale)
+        : tr('promoted.noChief', null, locale);
       copy = {
         label: copy.label,
-        headline: '你采纳了一个候选结论',
-        desc: `这是可信度 ${formatPercent(best.confidence)} 的备选读法，${chief}。`,
+        headline: tr('promoted.headline', null, locale),
+        desc: tr('promoted.desc', { pct: formatPercent(best.confidence), chief }, locale),
       };
     }
     return copy;
   }
 
-  function detectLangName(text) {
+  function detectLangName(text, locale) {
     const Scorer = mod('Scorer');
     try {
       if (Scorer && typeof Scorer.detectLang === 'function') {
-        const r = Scorer.detectLang(String(text || ''));
+        const r = Scorer.detectLang(String(text || ''), { locale: currentLocale(locale) });
         if (r && r.name) return r.name;
       }
     } catch (_) { /* language is a nice-to-have */ }
@@ -846,29 +1033,30 @@
   }
 
   // Never guess a language from the mojibake itself: only from a reading, or from clean input.
-  function languageFact(view) {
+  function languageFact(view, locale) {
     const v = view || {};
     const best = v.best;
     if (best && typeof best.output === 'string') {
-      if (bestIsOnlyPlaceholders(best)) return '无法判断';
-      return langNameOf(v) || detectLangName(best.output);
+      if (bestIsOnlyPlaceholders(best)) return tr('lang.undetermined', null, locale);
+      return langNameOf(v) || detectLangName(best.output, locale);
     }
-    return v.status === 'clean' ? detectLangName(v.input) : '无法判断';
+    return v.status === 'clean' ? detectLangName(v.input, locale) : tr('lang.undetermined', null, locale);
   }
 
   // Repair.step indexes best.steps (steps[0] surface … steps[n-1] deepest, whose `after` is the
   // final output). Repairs in shallower layers have no position in the final output.
-  function repairLine(repair, steps) {
+  function repairLine(repair, steps, locale) {
     const r = repair || {};
     const n = Array.isArray(steps) ? steps.length : 0;
     const intermediate = Number.isInteger(r.step) && r.step >= 0 && r.step < n - 1;
-    const where = intermediate ? `第 ${r.step + 1} 层（中间层）` : repairPosition(r);
-    const from = r.from ? visibleText(r.from) : '（丢失）';
-    const to = r.to != null && r.to !== '' ? visibleText(r.to) : '（空）';
+    const where = intermediate ? tr('repair.intermediate', { n: r.step + 1 }, locale) : repairPosition(r, locale);
+    const from = r.from ? visibleText(r.from) : tr('common.lost', null, locale);
+    const to = r.to != null && r.to !== '' ? visibleText(r.to) : tr('common.empty', null, locale);
     const cands = Array.isArray(r.candidates) && r.candidates.length
-      ? `；候选：${r.candidates.slice(0, 6).map(visibleText).join('、')}`
+      ? tr('common.cands', { list: r.candidates.slice(0, 6).map(visibleText).join(tr('common.listSep', null, locale)) }, locale)
       : '';
-    return `${where}：「${from}」→「${to}」 · ${REPAIR_REASONS[r.reason] || '修复'}${cands}`;
+    const reason = tr(REPAIR_REASONS.includes(r.reason) ? `repair.reason.${r.reason}` : 'repair.reason.fallback', null, locale);
+    return tr('repair.line', { where, from, to, reason, cands }, locale);
   }
 
   /*
@@ -895,22 +1083,22 @@
       .replace(/^([ \t]{0,3}\[[^\]\n]+\]):([ \t]*)(\S+)/gm, (m, label, sp, dest) => (isDangerousUrl(dest) ? `${label} :${sp}${dest}` : m));
   }
 
-  function inlineCode(text) {
+  function inlineCode(text, locale) {
     const s = String(text == null ? '' : text).replace(/\r?\n/g, '↵');
-    if (!s) return '（空）';
+    if (!s) return tr('common.empty', null, locale);
     const fence = '`'.repeat(longestRun(s, '`') + 1);
     const pad = s.startsWith('`') || s.endsWith('`') || s.startsWith(' ') ? ' ' : '';
     return `${fence}${pad}${s}${pad}${fence}`;
   }
 
   // Repair.index is -1 when the engine cannot trace a deeper-layer repair to the final output.
-  function repairPosition(r) {
+  function repairPosition(r, locale) {
     const i = r ? Number(r.index) : NaN;
-    return Number.isInteger(i) && i >= 0 ? `第 ${i + 1} 个字` : '某处';
+    return Number.isInteger(i) && i >= 0 ? tr('repair.position', { n: i + 1 }, locale) : tr('repair.somewhere', null, locale);
   }
 
-  function mdCell(text) {
-    return inlineCode(text).replace(/\|/g, '\\|');
+  function mdCell(text, locale) {
+    return inlineCode(text, locale).replace(/\|/g, '\\|');
   }
 
   // One row per output character: which garbled characters shared its bytes.
@@ -949,11 +1137,15 @@
     return '';
   }
 
+  // opts: { view, engineBest?, exhibitId?, date?, narrationText?, locale? } — the report follows
+  // opts.locale (default: the current interface language).
   function buildMarkdownReport(opts) {
     const o = opts || {};
+    const loc = currentLocale(o.locale);
+    const T = (key, params) => tr(key, params, loc);
     const view = o.view || {};
     const status = normalizeStatus(view.status);
-    const copy = statusCopy(view, o.engineBest);
+    const copy = statusCopy(view, o.engineBest, loc);
     const best = view.best || null;
     const steps = stepsOf(best);
     const exhibitId = o.exhibitId || fallbackExhibitId(view.input);
@@ -961,48 +1153,54 @@
     const lost = status === 'irrecoverable';
     const lines = [];
 
-    lines.push(`# 乱码考古鉴定报告 · ${exhibitId}`, '');
-    lines.push(`> 由「乱码考古学家 · Mojibake Archaeologist」生成于 ${formatDate(o.date || new Date())}`, '');
-    lines.push('| 项目 | 结论 |', '|---|---|');
-    lines.push(`| 鉴定状态 | ${copy.label}（${status}）${view.promotedFrom != null ? '（用户采纳的候选）' : ''} |`);
+    lines.push(T('report.title', { id: exhibitId }), '');
+    lines.push(T('report.generated', { date: formatDate(o.date || new Date()) }), '');
+    lines.push(T('report.tableHead'), '|---|---|');
+    lines.push(T('report.status', { label: copy.label, status, promoted: view.promotedFrom != null ? T('report.promoted') : '' }));
     if (best) {
-      lines.push(`| ${lost ? '判定把握' : '可信度'} | ${formatPercent(best.confidence)} |`);
+      lines.push(`| ${T(lost ? 'facts.diagnosis' : 'facts.confidence')} | ${formatPercent(best.confidence)} |`);
       const lang = bestIsOnlyPlaceholders(best) ? '' : langNameOf(view);
-      if (lang) lines.push(`| 语言 | ${lang} |`);
-      if (best.label) lines.push(`| 结论 | ${String(best.label).replace(/\|/g, '\\|')} |`);
-      lines.push(`| 地层数 | ${steps.length} |`);
+      if (lang) lines.push(`| ${T('facts.lang')} | ${lang} |`);
+      if (best.label) lines.push(`| ${T('facts.verdict')} | ${String(best.label).replace(/\|/g, '\\|')} |`);
+      lines.push(`| ${T('facts.strata')} | ${steps.length} |`);
     }
-    lines.push('', '## 出土乱码', '', fenced(view.input), '');
-    if (best) lines.push(lost ? '## 残存内容（原文已丢失）' : '## 还原原文', '', fenced(best.output), '');
+    lines.push('', T('report.relic'), '', fenced(view.input), '');
+    if (best) lines.push(T(lost ? 'report.remains' : 'report.restored'), '', fenced(best.output), '');
 
     if (steps.length) {
-      lines.push('## 误读链路（按时间顺序）', '');
+      lines.push(T('report.chain'), '');
       forwardChain(steps).forEach((n, i) => {
         const text = n.kind === 'escape'
-          ? `${n.from ? `以 **${encName(n.from)}** 编码的字节` : '字符'}被写成 **${schemeName(n.scheme)}**。`
-          : `以 **${encName(n.from)}** 编码的字节，被当作 **${encName(n.to)}** 解读${n.lossy ? '（有损：途中丢失了部分字节）' : ''}。`;
+          ? (n.from
+            ? T('report.chainEscapeFrom', { enc: encName(n.from, loc), scheme: schemeName(n.scheme, loc) })
+            : T('report.chainEscapeChars', { scheme: schemeName(n.scheme, loc) }))
+          : T('report.chainMisread', { from: encName(n.from, loc), to: encName(n.to, loc), lossy: n.lossy ? T('report.chainLossy') : '' });
         lines.push(`${i + 1}. ${text}`);
       });
-      lines.push('', '## 地层剖面（由表及里）', '');
+      lines.push('', T('report.strata'), '');
       steps.forEach((step, i) => {
-        lines.push(`### 第 ${i + 1} 层：${stepTitle(step)}`, '');
-        lines.push(`- 本层输入：${inlineCode(truncate(step.before, 200))}`);
+        lines.push(T('report.layer', { n: i + 1, title: stepTitle(step, loc) }), '');
+        lines.push(T('report.layerInput', { value: inlineCode(truncate(step.before, 200), loc) }));
         const bytes = toBytes(step.bytes);
         if (bytes && bytes.length) {
           const n = Math.min(64, bytes.length);
-          lines.push(`- 中间字节（共 ${bytes.length} 字节${bytes.length > n ? `，仅列前 ${n} 个` : ''}）：${inlineCode(hexOf(bytes, 0, n))}`);
+          lines.push(T('report.layerBytes', {
+            n: bytes.length,
+            more: bytes.length > n ? T('report.layerBytesMore', { n }) : '',
+            hex: inlineCode(hexOf(bytes, 0, n), loc),
+          }));
         }
-        lines.push(`- 本层输出：${inlineCode(truncate(step.after, 200))}`);
-        if (step.lossy) lines.push('- 本层有损：部分字节在流转中丢失，已尽力修复');
+        lines.push(T('report.layerOutput', { value: inlineCode(truncate(step.after, 200), loc) }));
+        if (step.lossy) lines.push(T('report.layerLossy'));
         const repairs = Array.isArray(step.repairs) ? step.repairs : [];
         repairs.slice(0, 10).forEach((r) => {
           const rr = r && Number.isInteger(r.step) ? r : Object.assign({}, r, { step: i });
-          lines.push(`- 修复：${repairLine(rr, steps)}`);
+          lines.push(T('report.repair', { line: repairLine(rr, steps, loc) }));
         });
         const rows = charMapRows(step, 16);
         if (rows.length) {
-          lines.push('', '| 误读字符 | 字节 | 还原字符 |', '|---|---|---|');
-          rows.forEach((r) => lines.push(`| ${mdCell(r.before)} | ${r.hex} | ${mdCell(r.after)}${r.repaired ? '（修复）' : ''} |`));
+          lines.push('', T('report.mapHead'), '|---|---|---|');
+          rows.forEach((r) => lines.push(`| ${mdCell(r.before, loc)} | ${r.hex} | ${mdCell(r.after, loc)}${r.repaired ? T('report.mapRepaired') : ''} |`));
         }
         lines.push('');
       });
@@ -1010,26 +1208,29 @@
 
     const sigs = Array.isArray(view.signatures) ? view.signatures : [];
     if (sigs.length) {
-      lines.push('## 名器签名', '');
-      sigs.forEach((s) => lines.push(`- **${s.title || s.id}**：${inlineCode(s.match)}${s.note ? ` —— ${s.note}` : ''}`));
+      lines.push(T('report.sigs'), '');
+      sigs.forEach((s) => lines.push(T('report.sig', {
+        title: s.title || s.id, match: inlineCode(s.match, loc), note: s.note ? T('report.sigNote', { note: s.note }) : '',
+      })));
       lines.push('');
     }
 
     if (o.narrationText && String(o.narrationText).trim()) {
-      lines.push('## 讲解员解说', '', defangMarkdown(String(o.narrationText).trim()), '');
+      lines.push(T('report.narration'), '', defangMarkdown(String(o.narrationText).trim()), '');
     }
-    lines.push('---', '', '_本报告在浏览器本地生成；技术细节以字节数据为准。_');
+    lines.push('---', '', T('report.footer'));
     return lines.join('\n');
   }
 
-  function digLines(input) {
+  function digLines(input, locale) {
+    const T = (key, params) => tr(key, params, locale);
     const s = String(input || '');
     const n = Array.from(s).length;
-    const lines = ['清理表层浮土…', `测量地层厚度：${n} 个字符`];
-    if (/%[0-9A-Fa-f]{2}|\\x[0-9A-Fa-f]{2}|&#x?[0-9A-Fa-f]+;|\\u[0-9A-Fa-f]{4}|=[0-9A-F]{2}/.test(s)) lines.push('揭开转义层的封泥…');
-    if (/[锟斤拷烫屯]/.test(s)) lines.push('发现可疑铭文：疑似名器出土…');
-    lines.push('比对 Windows-1252 地层…', '比对 GBK 地层…', '比对 Shift_JIS 与 Big5 地层…', '比对 KOI8-R 与 CP437 地层…');
-    lines.push('用 UTF-8 刷子清扫字节缝隙…', '进行字节测年…', '拼合残片，撰写展签…');
+    const lines = [T('dig.line.topsoil'), T('dig.line.measure', { n })];
+    if (/%[0-9A-Fa-f]{2}|\\x[0-9A-Fa-f]{2}|&#x?[0-9A-Fa-f]+;|\\u[0-9A-Fa-f]{4}|=[0-9A-F]{2}/.test(s)) lines.push(T('dig.line.escape'));
+    if (/[锟斤拷烫屯]/.test(s)) lines.push(T('dig.line.famous'));
+    lines.push(T('dig.line.cp1252'), T('dig.line.gbk'), T('dig.line.sjis'), T('dig.line.koi8'));
+    lines.push(T('dig.line.brush'), T('dig.line.dating'), T('dig.line.label'));
     return lines;
   }
 
@@ -1058,11 +1259,11 @@
   }
 
   // One entry per distinct hint, with its (deduplicated) matches and how many times it fired.
-  function groupSignals(signals) {
+  function groupSignals(signals, locale) {
     const groups = new Map();
     for (const s of Array.isArray(signals) ? signals : []) {
       if (!s) continue;
-      const key = String(s.hint || s.type || '乱码特征');
+      const key = String(s.hint || s.type || tr('signals.default', null, locale));
       if (!groups.has(key)) groups.set(key, { hint: key, matches: [], count: 0 });
       const g = groups.get(key);
       g.count += 1;
@@ -1139,15 +1340,15 @@
     return effectiveHost(f.baseUrl, p) !== effectiveHost(s.baseUrl, p);
   }
 
-  function relativeTime(ts, now) {
+  function relativeTime(ts, now, locale) {
     const diff = Math.max(0, (now || Date.now()) - ts);
     const min = Math.floor(diff / 60000);
-    if (min < 1) return '刚刚';
-    if (min < 60) return `${min} 分钟前`;
+    if (min < 1) return tr('time.justNow', null, locale);
+    if (min < 60) return tr('time.minutes', { n: min }, locale);
     const hours = Math.floor(min / 60);
-    if (hours < 24) return `${hours} 小时前`;
+    if (hours < 24) return tr('time.hours', { n: hours }, locale);
     const days = Math.floor(hours / 24);
-    if (days < 30) return `${days} 天前`;
+    if (days < 30) return tr('time.days', { n: days }, locale);
     const d = new Date(ts);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
@@ -1169,6 +1370,9 @@
       aiFailureBlocksRetry, isTruncatedStop, visibleText, statusCopy, languageFact, detectLangName,
       repairLine, defangMarkdown, partitionAlternatives, groupSignals, providerSwitchForm,
       keyNeedsReentry, urlHost,
+      // Additive helpers (i18n, docs/ARCHITECTURE.md §11).
+      currentLocale, tr, copyFor, stripLangParam, aiErrorCore, fallbackStyles, fallbackGallery,
+      relabelResult,
     },
     STATUS_COPY,
     PARTIAL_CLEAN_COPY,
@@ -1223,6 +1427,15 @@
     lastInput: '',
     toastTimer: 0,
     clearArmed: 0,
+    // i18n: what is needed to redraw everything in another language.
+    resultOpts: null, // engine options the current result was computed with
+    hasError: false, // the results panel shows an analysis error
+    lastError: null,
+    docentStatus: null, // status line: a string, or a function re-evaluated on a language switch
+    forgeStoryKey: null, // dictionary key of the recipe story when no preset is selected
+    forgeLast: null, // last forge action, replayed on a language switch
+    testMsg: null, // { key, params, cls } of a settings test line written from the dictionary
+    testRaw: null, // { ok, cls } when that line quotes llm.js's message (in the test's language)
   };
 
   // ---------- small DOM utilities ----------
@@ -1392,13 +1605,44 @@
 
   async function copyWithToast(text, okMessage) {
     const ok = await copyText(text);
-    toast(ok ? okMessage : '复制失败：浏览器不允许访问剪贴板，请手动选择复制。');
+    toast(ok ? okMessage : tr('copy.failed'));
   }
 
+  // Docent styles in the current language (Narrator.styles(locale), §11.3). A narrator without
+  // it still provides ids/avatars; the names then come from the UI dictionary.
   function stylesList() {
     const Narrator = mod('Narrator');
-    const list = Narrator && Array.isArray(Narrator.STYLES) ? Narrator.STYLES.filter((s) => s && s.id) : [];
-    return list.length ? list : FALLBACK_STYLES;
+    const loc = currentLocale();
+    let list = [];
+    let localized = false;
+    if (Narrator && typeof Narrator.styles === 'function') {
+      try {
+        const out = Narrator.styles(loc);
+        if (Array.isArray(out)) {
+          list = out.filter((s) => s && s.id);
+          localized = true;
+        }
+      } catch (_) { list = []; }
+    }
+    if (!list.length && Narrator && Array.isArray(Narrator.STYLES)) {
+      list = Narrator.STYLES.filter((s) => s && s.id);
+      localized = loc === 'zh-CN';
+    }
+    if (!list.length) return fallbackStyles(loc);
+    if (loc === 'zh-CN') return list;
+    // Without its language pack the narrator still answers in Chinese: name the styles from the
+    // UI dictionary and drop Chinese taglines.
+    const I18n = mod('I18n');
+    const han = /\p{Script=Han}/u;
+    return list.map((s) => {
+      const nameOk = localized && typeof s.name === 'string' && s.name && !han.test(s.name);
+      const taglineOk = localized && typeof s.tagline === 'string' && !han.test(s.tagline);
+      if (nameOk && (taglineOk || !s.tagline)) return s;
+      return Object.assign({}, s, {
+        name: nameOk ? s.name : (I18n && I18n.has(`style.${s.id}`, loc) ? tr(`style.${s.id}`, null, loc) : s.name),
+        tagline: taglineOk ? s.tagline : undefined,
+      });
+    });
   }
 
   function styleInfo(id) {
@@ -1420,7 +1664,7 @@
       'historyList', 'historyEmpty', 'historyClear', 'settingsDialog', 'settingsForm', 'closeSettings', 'setProvider',
       'llmFields', 'setKey', 'toggleKey', 'setRemember', 'setBaseUrl', 'setModel', 'modelList', 'setEffort',
       'testConn', 'testResult', 'setStyle', 'setAnimation', 'setVoice', 'clearKey', 'toast', 'srAnnounce',
-      'alternatives', 'altsTitle', 'effortHint', 'galleryTitle', 'strata', 'narrMore',
+      'alternatives', 'altsTitle', 'effortHint', 'galleryTitle', 'strata', 'narrMore', 'langSwitch',
     ];
     for (const id of ids) els[id] = document.getElementById(id);
   }
@@ -1428,25 +1672,234 @@
   function boot() {
     cacheEls();
     state.prefs = mergePrefs(readJson(PREFS_KEY, null));
-    state.style = styleInfo(state.prefs.style).id;
-    applyTheme();
-    applyMotionClass();
-    checkModules();
-    setupShortcutHint();
-    syncEngineParams();
-    renderStyleSwitch();
-    updateDocentIdentity('正在候场');
-    renderGallery();
-    setupForge();
-    renderHistory();
-    setupSettings();
-    updateAiToggle();
-    updateVoiceButton();
-    bindEvents();
-    updateCount();
+    try {
+      // The <head> script hid the page for a non-default language; translate before revealing it.
+      applyLocaleToPage();
+      state.style = styleInfo(state.prefs.style).id;
+      applyTheme();
+      applyMotionClass();
+      checkModules();
+      setupShortcutHint();
+      syncEngineParams();
+      renderStyleSwitch();
+      updateDocentIdentity(() => tr('docent.status.waiting'));
+      renderGallery();
+      setupForge();
+      renderHistory();
+      setupSettings();
+      updateAiToggle();
+      updateVoiceButton();
+      bindEvents();
+      bindLocale();
+      updateCount();
+    } finally {
+      document.documentElement.removeAttribute('data-i18n-pending');
+    }
 
     const q = readHashQuery(window.location.hash);
     if (q) openFromHash(q);
+  }
+
+  // ---------- interface language (docs/ARCHITECTURE.md §11) ----------
+
+  function localeInfo(loc) {
+    const I18n = mod('I18n');
+    const list = I18n && Array.isArray(I18n.LOCALES) ? I18n.LOCALES : [];
+    return list.find((l) => l && l.id === loc) || { id: loc, htmlLang: loc, speech: loc };
+  }
+
+  /*
+   * Static text in index.html: data-i18n (textContent), data-i18n-html (markup from the trusted
+   * dictionary only, never user data) and data-i18n-attr="attr:key;attr:key".
+   */
+  function applyStaticText(scope) {
+    if (!mod('I18n')) return;
+    const base = scope || document;
+    for (const el of base.querySelectorAll('[data-i18n]')) el.textContent = tr(el.getAttribute('data-i18n'));
+    for (const el of base.querySelectorAll('[data-i18n-html]')) el.innerHTML = tr(el.getAttribute('data-i18n-html'));
+    for (const el of base.querySelectorAll('[data-i18n-attr]')) {
+      for (const pair of el.getAttribute('data-i18n-attr').split(';')) {
+        const i = pair.indexOf(':');
+        const attr = i > 0 ? pair.slice(0, i).trim() : '';
+        const key = i > 0 ? pair.slice(i + 1).trim() : '';
+        if (attr && key) el.setAttribute(attr, tr(key));
+      }
+    }
+  }
+
+  function applyLocaleToPage() {
+    const loc = currentLocale();
+    document.documentElement.lang = localeInfo(loc).htmlLang || loc;
+    if (!mod('I18n')) return;
+    applyStaticText();
+    document.title = tr('meta.title');
+    const meta = document.querySelector('meta[name="description"]');
+    if (meta) meta.setAttribute('content', tr('meta.description'));
+    updateLangSwitch(loc);
+  }
+
+  // The masthead switch (els.langSwitch) and its twin in the settings drawer, which is modal.
+  function langSwitches() {
+    return Array.from(document.querySelectorAll('.lang-switch'));
+  }
+
+  function updateLangSwitch(loc) {
+    for (const group of langSwitches()) {
+      for (const btn of group.querySelectorAll('[data-locale]')) {
+        btn.setAttribute('aria-pressed', String(btn.getAttribute('data-locale') === loc));
+      }
+    }
+  }
+
+  function bindLocale() {
+    const I18n = mod('I18n');
+    for (const group of langSwitches()) {
+      // Without i18n.js there is nothing to switch to: hide the control (and its drawer row).
+      (group.closest('.lang-pick') || group).hidden = !I18n;
+      group.addEventListener('click', (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest('[data-locale]') : null;
+        if (btn) chooseLocale(btn.getAttribute('data-locale'));
+      });
+    }
+    if (I18n && typeof I18n.onChange === 'function') I18n.onChange(onLocaleChanged);
+  }
+
+  // A visitor's explicit choice is remembered (mbx.prefs.lang) and replaces any ?lang= in the URL.
+  function chooseLocale(id) {
+    const I18n = mod('I18n');
+    const loc = normLocale(id);
+    if (!I18n || !loc) return;
+    state.prefs.lang = loc;
+    savePrefs();
+    dropLangParam();
+    if (loc === currentLocale()) updateLangSwitch(loc);
+    else I18n.setLocale(loc);
+  }
+
+  function dropLangParam() {
+    try {
+      const href = window.location.href;
+      const next = stripLangParam(href);
+      if (next !== href && window.history && typeof window.history.replaceState === 'function') {
+        window.history.replaceState(window.history.state, '', next);
+      }
+    } catch (_) { /* some file:// setups refuse; the saved preference still applies */ }
+  }
+
+  // Labels whose text depends on UI state; data-i18n just reset them to their idle wording.
+  function syncDynamicLabels() {
+    updateThemeButton();
+    updateCount();
+    setSpeaking(state.speaking);
+    updateNarrMore(!els.narrMore.hidden);
+    els.toggleKey.textContent = tr(els.setKey.type === 'password' ? 'settings.show' : 'settings.hide');
+    els.historyClear.textContent = tr(state.clearArmed ? 'cabinet.clearConfirm' : 'cabinet.clear');
+    if (els.altsTitle && state.result) els.altsTitle.textContent = tr(state.result.status === 'unknown' ? 'alts.titleGuesses' : 'alts.title');
+    updateDocentIdentity();
+  }
+
+  function onLocaleChanged() {
+    stopSpeech();
+    applyLocaleToPage();
+    syncDynamicLabels();
+    if (!els.moduleNotice.hidden) checkModules();
+    renderStyleSwitch();
+    renderGallery();
+    relocalizeForge();
+    renderHistory();
+    if (els.settingsDialog.open) relabelSettings();
+    else state.testMsg = state.testRaw = null;
+    relocalizeResults();
+    announce(tr('lang.switched'));
+  }
+
+  /*
+   * Rewords the relic on display in the new language. The search is language-independent, so the
+   * result is relabeled rather than searched again (Engine.analyze only when that is impossible),
+   * and the adopted alternative, style, seed, expanded strata, pinned byte, open disclosures and
+   * the expanded docent all stay. An AI narration in progress starts over in the new language; a
+   * finished or stopped one is not requested again (every request spends the visitor's quota).
+   */
+  function relocalizeResults() {
+    // A dig in progress analyzes in the new language when it finishes; only its log is reworded.
+    if (state.dig && !state.dig.done && !state.dig.cancelled) {
+      relabelDigLog(state.dig);
+      return;
+    }
+    if (state.result) {
+      const keep = captureViewState();
+      const aiWasRunning = !!state.ai.controller;
+      state.result = localizedResult(state.result, state.resultOpts);
+      state.view = deriveView(state.result, state.viewIndex);
+      state.viewIndex = state.view.promotedFrom;
+      state.narration = computeNarration(state.view);
+      renderResults();
+      startNarration({ animate: false, ai: aiWasRunning });
+      restoreViewState(keep);
+      return;
+    }
+    if (state.hasError && !els.results.hidden) renderAnalysisError(state.lastError);
+    else if (!state.view) updateDocentIdentity(() => tr('docent.status.waiting'));
+  }
+
+  // `result` in the current language: relabeled, or analyzed again when it cannot be relabeled.
+  function localizedResult(result, opts) {
+    const loc = currentLocale();
+    if (!result || result.locale === loc) return result;
+    const relabeled = relabelResult(result, loc);
+    if (relabeled) return relabeled;
+    const Engine = mod('Engine');
+    try {
+      if (Engine && typeof Engine.analyze === 'function') {
+        const fresh = Engine.analyze(result.input, Object.assign({}, opts || engineOptions(), { locale: loc }));
+        if (fresh) return normalizeResult(fresh, result.input);
+      }
+    } catch (err) {
+      if (typeof console !== 'undefined') console.error('[MBX] Engine.analyze failed while switching language', err);
+    }
+    return result;
+  }
+
+  /*
+   * What the visitor opened by hand in the results, which a re-render would reset: <details>
+   * (low-confidence guesses, the era's evidence), the pinned byte of each stratum, and the
+   * "read the full text" docent.
+   */
+  function captureViewState() {
+    const open = new Set();
+    for (const d of els.results.querySelectorAll('details[open]')) if (d.className) open.add(d.className);
+    const pins = [];
+    for (const grid of els.strataBody.querySelectorAll('.bytegrid')) {
+      const ctx = gridCtx.get(grid);
+      const el = ctx && ctx.pinned;
+      if (!el || pins.some((p) => p.index === ctx.index)) continue;
+      const row = el.dataset.row === 'top' ? 'top' : 'bottom';
+      const k = (row === 'top' ? ctx.topEls : ctx.bottomEls).indexOf(el);
+      if (k >= 0) pins.push({ index: ctx.index, row, k });
+    }
+    return { open, pins, narrExpanded: !!state.narrExpanded };
+  }
+
+  function restoreViewState(keep) {
+    if (!keep) return;
+    for (const d of els.results.querySelectorAll('details')) if (keep.open.has(d.className)) d.open = true;
+    for (const pin of keep.pins) {
+      for (const grid of els.strataBody.querySelectorAll('.bytegrid')) {
+        const ctx = gridCtx.get(grid);
+        if (!ctx || ctx.index !== pin.index) continue;
+        const el = (pin.row === 'top' ? ctx.topEls : ctx.bottomEls)[pin.k];
+        if (el) {
+          activateChar(ctx, el);
+          ctx.pinned = el;
+        }
+        break;
+      }
+    }
+    if (keep.narrExpanded) {
+      state.narrExpanded = true;
+      setNarrClamp(0);
+      updateDocentSticky();
+    }
   }
 
   function openFromHash(q) {
@@ -1458,18 +1911,22 @@
     }
     // Engine.analyze is synchronous: a crafted multi-megabyte link must not freeze the tab.
     state.lastInput = q;
-    toast(`内容较长（${Array.from(q).length} 字），请点击「开始发掘」再分析`);
+    toast(tr('dig.longHash', { n: Array.from(q).length }));
   }
 
   function checkModules() {
+    if (!mod('I18n')) {
+      // No dictionary to translate this one: say it in both languages.
+      els.moduleNotice.textContent = '界面语言模块（src/i18n.js）未加载，请确认 src 目录完整后刷新页面。 · The interface language module (src/i18n.js) did not load; make sure the src folder is complete and reload the page.';
+      els.moduleNotice.hidden = false;
+      return;
+    }
     const files = { Codecs: 'codecs.js', Scorer: 'scorer.js', Forge: 'forge.js', Engine: 'engine.js', Narrator: 'narrator.js', LLM: 'llm.js' };
     const missing = Object.keys(files).filter((name) => !mod(name));
     if (!missing.length) return;
     const critical = missing.filter((n) => n === 'Engine' || n === 'Codecs');
-    const list = missing.map((n) => `${n}（src/${files[n]}）`).join('、');
-    els.moduleNotice.textContent = critical.length
-      ? `部分展馆设施尚未就位：缺少 ${list}。鉴定引擎暂时无法开工，请确认 src 目录完整后刷新页面。`
-      : `部分展馆设施尚未就位：缺少 ${list}。主要鉴定功能仍可使用，相关展区会以简化方式开放。`;
+    const list = missing.map((n) => tr('modules.item', { name: n, file: files[n] })).join(tr('common.listSep'));
+    els.moduleNotice.textContent = tr(critical.length ? 'modules.critical' : 'modules.partial', { list });
     els.moduleNotice.hidden = false;
   }
 
@@ -1512,7 +1969,7 @@
       state.prefs.theme = effectiveTheme() === 'dark' ? 'light' : 'dark';
       savePrefs();
       applyTheme();
-      toast(state.prefs.theme === 'dark' ? '已切换到夜间展厅' : '已切换到白昼展厅');
+      toast(tr(state.prefs.theme === 'dark' ? 'theme.nowDark' : 'theme.nowLight'));
     });
     if (typeof darkScheme.addEventListener === 'function') darkScheme.addEventListener('change', updateThemeButton);
 
@@ -1521,7 +1978,8 @@
       if (!state.view) return;
       state.narration = computeNarration(state.view);
       startNarration();
-      updateDocentIdentity(`${currentDocent().shortName} 接班上岗，开讲了…`);
+      const name = currentDocent().shortName;
+      updateDocentIdentity(() => tr('docent.status.newShift', { name }));
     });
     els.styleSwitch.addEventListener('change', (e) => {
       if (e.target && e.target.name === 'docentStyle') setStyle(e.target.value);
@@ -1540,9 +1998,9 @@
       try { state.ai.controller.abort(); } catch (_) { /* ignore */ }
     });
     els.speakBtn.addEventListener('click', () => (state.speaking ? stopSpeech() : speakText(currentNarrationText())));
-    els.copyNarration.addEventListener('click', () => copyWithToast(currentNarrationText(), '讲解词已复制'));
+    els.copyNarration.addEventListener('click', () => copyWithToast(currentNarrationText(), tr('docent.copied')));
     els.narrMore.addEventListener('click', onNarrMore);
-    els.copyReport.addEventListener('click', () => copyWithToast(currentReport(), '鉴定报告（Markdown）已复制'));
+    els.copyReport.addEventListener('click', () => copyWithToast(currentReport(), tr('docent.reportCopied')));
 
     // Byte-grid interactions are delegated so re-rendering a stratum needs no rebinding.
     els.strataBody.addEventListener('mouseover', onGridPointer);
@@ -1584,20 +2042,20 @@
 
   function updateCount() {
     const n = Array.from(els.relicInput.value).length;
-    els.relicCount.textContent = `${n} 字`;
+    els.relicCount.textContent = tr('dig.count', { n });
   }
 
   async function onCopyShare() {
     const input = els.relicInput.value;
     if (!input.trim()) {
-      toast('先在探方里放一段乱码，再复制分享链接。');
+      toast(tr('share.empty'));
       return;
     }
     const url = buildShareUrl(window.location.href, input);
     const ok = await copyText(url);
-    if (!ok) toast('复制失败：浏览器不允许访问剪贴板。');
-    else if (url.length > 8000) toast('分享链接已复制（内容较长，部分平台可能截断链接）。');
-    else toast('分享链接已复制：打开即自动发掘。');
+    if (!ok) toast(tr('share.failed'));
+    else if (url.length > 8000) toast(tr('share.long'));
+    else toast(tr('share.ok'));
   }
 
   // ---------- theme & motion ----------
@@ -1636,7 +2094,7 @@
   }
 
   function updateThemeButton() {
-    const label = effectiveTheme() === 'dark' ? '切换到白昼展厅（浅色主题）' : '切换到夜间展厅（深色主题）';
+    const label = tr(effectiveTheme() === 'dark' ? 'theme.toLight' : 'theme.toDark');
     els.themeToggle.setAttribute('aria-label', label);
     els.themeToggle.title = label;
   }
@@ -1669,13 +2127,30 @@
     return Object.assign({}, state.prefs.engine);
   }
 
+  // Content records with optional `en: { … }` texts (§11.3), for modules without a locale accessor.
+  function localizeRecords(list, fields, loc) {
+    if (loc === 'zh-CN') return list;
+    return list.map((it) => {
+      const tx = it && it.en && typeof it.en === 'object' ? it.en : null;
+      if (!tx) return it;
+      const out = Object.assign({}, it);
+      for (const f of fields) if (typeof tx[f] === 'string') out[f] = tx[f];
+      return out;
+    });
+  }
+
   // ---------- gallery ----------
 
   function galleryItems() {
     const Forge = mod('Forge');
-    const list = Forge && Array.isArray(Forge.GALLERY) ? Forge.GALLERY : null;
+    const loc = currentLocale();
+    let list = null;
+    if (Forge && typeof Forge.gallery === 'function') {
+      try { list = Forge.gallery(loc); } catch (_) { list = null; }
+    }
+    if (!Array.isArray(list)) list = Forge && Array.isArray(Forge.GALLERY) ? localizeRecords(Forge.GALLERY, ['title', 'blurb'], loc) : null;
     const valid = (list || []).filter((it) => it && typeof it.relic === 'string' && it.relic);
-    return valid.length ? valid : FALLBACK_GALLERY;
+    return valid.length ? valid : fallbackGallery(loc);
   }
 
   function renderGallery() {
@@ -1692,15 +2167,15 @@
           startExcavation(it.relic, { source: 'gallery' });
         },
       },
-      h('span', { class: 'relic-card__no' }, `藏品 No.${String(i + 1).padStart(2, '0')}`),
-      h('span', { class: 'relic-card__title' }, it.title || '无名残片'),
+      h('span', { class: 'relic-card__no' }, tr('gallery.no', { no: String(i + 1).padStart(2, '0') })),
+      h('span', { class: 'relic-card__title' }, it.title || tr('gallery.untitled')),
       h('code', { class: 'relic-card__relic' }, truncate(it.relic, 80)),
       it.blurb ? h('span', { class: 'relic-card__blurb' }, it.blurb) : null);
       els.galleryList.append(h('li', { class: 'gallery__item' }, card));
     });
     if (items.length > 6) {
       els.galleryMore.hidden = false;
-      els.galleryMore.textContent = state.galleryExpanded ? '收起馆藏' : `查看全部 ${items.length} 件馆藏`;
+      els.galleryMore.textContent = state.galleryExpanded ? tr('gallery.less') : tr('gallery.all', { n: items.length });
       els.galleryMore.setAttribute('aria-expanded', String(state.galleryExpanded));
     } else {
       els.galleryMore.hidden = true;
@@ -1728,6 +2203,8 @@
   function hideDigPanel() {
     if (!els.excavation) return;
     els.excavation.hidden = true;
+    // The log is rebuilt by the next dig; old lines would only linger in the old language.
+    if (els.digLog) els.digLog.textContent = '';
     els.excavation.classList.remove('is-overlay');
     els.excavation.style.top = '';
     if (els.results) els.results.classList.remove('is-stale');
@@ -1737,13 +2214,13 @@
     const source = (options && options.source) || 'manual';
     const text = String(input == null ? '' : input);
     if (!text.trim()) {
-      toast('探方里还是空的：先粘贴一段乱码吧。');
+      toast(tr('dig.empty'));
       els.relicInput.focus();
       return;
     }
     const Engine = mod('Engine');
     if (!Engine || typeof Engine.analyze !== 'function') {
-      toast('鉴定引擎（src/engine.js）尚未就位，暂时无法发掘。');
+      toast(tr('dig.noEngine'));
       checkModules();
       return;
     }
@@ -1752,7 +2229,10 @@
     updateCount();
     const token = ++state.runToken;
     const animate = motionOn();
-    const dig = { token, input: text, source, t0: now(), skip: !animate, timers: [], outcome: null, done: false };
+    const dig = {
+      token, input: text, source, t0: now(), skip: !animate, timers: [], outcome: null, done: false,
+      opts: engineOptions(), locale: currentLocale(),
+    };
     state.dig = dig;
     state.aiAuto = source !== 'hash';
     state.lastInput = text;
@@ -1764,8 +2244,10 @@
       if (state.runToken !== token) return;
       let result = null;
       let error = null;
+      // The language may have changed since the click: analyze in the one on screen now.
+      dig.locale = currentLocale();
       try {
-        result = Engine.analyze(text, engineOptions());
+        result = Engine.analyze(text, Object.assign({}, dig.opts, { locale: dig.locale }));
       } catch (err) {
         error = err;
       }
@@ -1791,7 +2273,7 @@
     els.digLog.textContent = '';
     const lines = digLines(dig.input);
     const step = Math.max(60, Math.floor(MIN_DIG_MS / lines.length));
-    lines.forEach((line, i) => {
+    lines.forEach((_, i) => {
       dig.timers.push(setTimeout(() => {
         if (state.runToken !== dig.token) return;
         const prev = els.digLog.querySelector('.is-current');
@@ -1799,7 +2281,8 @@
           prev.classList.remove('is-current');
           prev.classList.add('is-done');
         }
-        els.digLog.append(h('li', { class: 'dig-log__line is-current' }, line));
+        // Worded when shown (the visitor may switch language mid-dig; relabelDigLog fixes the rest).
+        els.digLog.append(h('li', { class: 'dig-log__line is-current', dataset: { line: String(i) } }, digLines(dig.input)[i]));
         // Keep the log short so it never pushes the layout around.
         while (els.digLog.children.length > 5) els.digLog.firstElementChild.remove();
       }, i * step));
@@ -1807,6 +2290,16 @@
     const rect = els.excavation.getBoundingClientRect();
     if (rect.bottom > window.innerHeight || rect.top < 0) {
       els.excavation.scrollIntoView({ block: 'center', behavior: motionOn() ? 'smooth' : 'auto' });
+    }
+  }
+
+  // The dig log lines already on screen, reworded in the current language.
+  function relabelDigLog(dig) {
+    if (!els.digLog || !dig) return;
+    const lines = digLines(dig.input);
+    for (const li of els.digLog.children) {
+      const i = Number(li.dataset && li.dataset.line);
+      if (Number.isInteger(i) && lines[i] != null) li.textContent = lines[i];
     }
   }
 
@@ -1826,7 +2319,21 @@
     const hadFocusInInput = document.activeElement === els.relicInput;
     hideDigPanel();
 
-    const { result, error } = dig.outcome;
+    let { result, error } = dig.outcome;
+    if (result && !error && dig.locale !== currentLocale()) {
+      // The language changed during the dig animation: word the result in the language on screen.
+      const relabeled = relabelResult(result, currentLocale());
+      if (relabeled) result = relabeled;
+      else {
+        const Engine = mod('Engine');
+        try {
+          result = Engine.analyze(dig.input, Object.assign({}, dig.opts, { locale: currentLocale() }));
+        } catch (err) {
+          error = err;
+          result = null;
+        }
+      }
+    }
     els.results.hidden = false;
     if (error || !result) {
       renderAnalysisError(error);
@@ -1834,6 +2341,8 @@
       return;
     }
 
+    state.hasError = false;
+    state.resultOpts = dig.opts;
     state.result = normalizeResult(result, dig.input);
     state.viewIndex = null;
     state.view = deriveView(state.result, null);
@@ -1846,9 +2355,12 @@
     const copy = statusCopy(state.view, state.result.best);
     const best = state.view.best;
     const lost = state.view.status === 'irrecoverable';
-    announce(`鉴定完成：${copy.label}。${best && !lost
-      ? `可信度 ${formatPercent(best.confidence)}。还原结果：${truncate(best.output, 60)}`
-      : copy.headline}`);
+    announce(tr('verdict.announce', {
+      label: copy.label,
+      detail: best && !lost
+        ? tr('verdict.announceDetail', { pct: formatPercent(best.confidence), output: truncate(best.output, 60) })
+        : copy.headline,
+    }));
     revealResults(hadFocusInInput);
   }
 
@@ -1869,12 +2381,14 @@
           window.history.replaceState(window.history.state, '', window.location.pathname + window.location.search);
           if (!state.longHashNoted) {
             state.longHashNoted = true;
-            toast('这段文字太长，地址栏不再附带它；需要分享时请用「复制分享链接」。');
+            toast(tr('share.tooLongForHash'));
           }
         }
         return;
       }
-      window.history.replaceState(window.history.state, '', buildShareUrl(window.location.href, input));
+      // The address bar keeps its own ?lang= (a reload stays in this language); copied share links drop it.
+      const base = String(window.location.href).split('#')[0];
+      window.history.replaceState(window.history.state, '', `${base}#q=${encodeURIComponent(input)}`);
     } catch (_) { /* some file:// setups refuse; sharing still works via the button */ }
   }
 
@@ -1882,27 +2396,29 @@
     state.result = null;
     state.view = null;
     state.narration = null;
-    const message = error && error.message ? error.message : '引擎没有返回结果';
+    state.hasError = true;
+    state.lastError = error || null;
+    const message = error && error.message ? error.message : tr('error.noResult');
     els.verdict.textContent = '';
     els.verdict.append(
-      h('div', { class: 'verdict__top' }, h('span', { class: 'badge badge--irrecoverable' }, '鉴定中断')),
-      h('h2', { class: 'verdict__headline', id: 'verdictTitle', tabindex: '-1' }, '鉴定仪器出了点故障'),
-      h('p', { class: 'verdict__desc' }, `引擎在发掘时绊了一跤：${truncate(message, 200)}。可以换一段文字再试，或检查 src/engine.js。`),
+      h('div', { class: 'verdict__top' }, h('span', { class: 'badge badge--irrecoverable' }, tr('error.badge'))),
+      h('h2', { class: 'verdict__headline', id: 'verdictTitle', tabindex: '-1' }, tr('error.headline')),
+      h('p', { class: 'verdict__desc' }, tr('error.desc', { message: truncate(message, 200) })),
     );
     els.strataBody.textContent = '';
-    els.strataBody.append(h('p', { class: 'strata__empty' }, '没有可展示的地层。'));
+    els.strataBody.append(h('p', { class: 'strata__empty' }, tr('error.noStrata')));
     els.narration.textContent = '';
-    els.narration.append(h('p', null, '讲解员正在等待仪器修复……'));
+    els.narration.append(h('p', null, tr('error.docentWaiting')));
     setNarrClamp(0);
     updateNarrMore(false);
     els.docent.classList.remove('is-sticky');
     els.altsList.textContent = '';
-    els.altsList.append(h('li', { class: 'alts__empty' }, '暂无其他看法。'));
+    els.altsList.append(h('li', { class: 'alts__empty' }, tr('error.noAlts')));
     const oldMore = els.alternatives.querySelector('.alts__more');
     if (oldMore) oldMore.remove();
     els.alternatives.hidden = false;
     els.signatures.hidden = true;
-    announce('鉴定中断：引擎出现错误。');
+    announce(tr('error.announce'));
   }
 
   // ---------- results rendering ----------
@@ -1944,7 +2460,7 @@
       if (long) {
         el.tabIndex = 0;
         el.setAttribute('role', 'region');
-        el.setAttribute('aria-label', `${el.dataset.scrollLabel || '文本'}（较长，可滚动查看）`);
+        el.setAttribute('aria-label', tr('scroll.label', { label: el.dataset.scrollLabel || tr('scroll.text') }));
       } else {
         el.removeAttribute('tabindex');
         el.removeAttribute('role');
@@ -1970,7 +2486,7 @@
   function updateNarrMore(visible) {
     if (!els.narrMore) return;
     els.narrMore.hidden = !visible;
-    els.narrMore.textContent = state.narrExpanded ? '收起讲解' : '展开全文';
+    els.narrMore.textContent = tr(state.narrExpanded ? 'docent.less' : 'docent.more');
     els.narrMore.setAttribute('aria-expanded', String(!!state.narrExpanded));
   }
 
@@ -2042,7 +2558,7 @@
       h('div', { class: 'verdict__top' },
         h('span', { class: 'plaque' }, currentExhibitId()),
         h('span', { class: `badge badge--${status}` }, copy.label),
-        view.promotedFrom != null ? h('span', { class: 'badge badge--promoted' }, '你采纳的候选结论') : null),
+        view.promotedFrom != null ? h('span', { class: 'badge badge--promoted' }, tr('verdict.promotedBadge')) : null),
       h('h2', { class: 'verdict__headline', id: 'verdictTitle', tabindex: '-1' }, copy.headline),
       h('p', { class: 'verdict__desc' }, copy.desc),
       renderRestoredFigure(view),
@@ -2066,20 +2582,20 @@
     let caption;
     let text;
     let relicStyle = false;
-    let copyLabel = best ? '复制原文' : '复制文本';
+    let copyLabel = tr(best ? 'verdict.copyOriginal' : 'verdict.copyText');
     if (best && typeof best.output === 'string' && view.status === 'irrecoverable') {
       // For an irrecoverable relic, best explains how it formed; it is not a rescue.
-      caption = '残存文字（原文已丢失）· What Remains';
+      caption = tr('verdict.capRemains');
       text = best.output;
-      copyLabel = '复制残存文字';
+      copyLabel = tr('verdict.copyRemains');
     } else if (best && typeof best.output === 'string') {
-      caption = '还原原文 · Restored';
+      caption = tr('verdict.capRestored');
       text = best.output;
     } else if (view.status === 'clean') {
-      caption = '原文（无需修复）· Intact';
+      caption = tr('verdict.capIntact');
       text = view.input;
     } else {
-      caption = '出土原样（未能还原）· As Found';
+      caption = tr('verdict.capAsFound');
       text = view.input;
       relicStyle = true;
     }
@@ -2087,7 +2603,7 @@
     return h('figure', { class: 'restored' },
       h('figcaption', { class: 'restored__cap' },
         h('span', null, caption),
-        h('button', { type: 'button', class: 'btn btn--ghost btn--small', onclick: () => copyWithToast(text, '已复制到剪贴板') }, copyLabel)),
+        h('button', { type: 'button', class: 'btn btn--ghost btn--small', onclick: () => copyWithToast(text, tr('copy.done')) }, copyLabel)),
       h('p', Object.assign({
         class: relicStyle ? 'restored__text restored__text--relic' : 'restored__text',
         'data-scroll-label': caption.split(' · ')[0],
@@ -2123,26 +2639,26 @@
       const conf = Number(best.confidence);
       const pct = Math.round(clamp(Number.isFinite(conf) ? conf : 0, 0, 1) * 100);
       const color = lost || pct < 45 ? 'var(--danger)' : pct < 75 ? 'var(--warn)' : 'var(--verdigris)';
-      const name = lost ? '判定把握' : '可信度';
+      const name = tr(lost ? 'facts.diagnosis' : 'facts.confidence');
       const gauge = h('div', {
         class: 'gauge', role: 'meter', 'aria-label': name, 'aria-valuemin': '0', 'aria-valuemax': '100',
         'aria-valuenow': String(pct), 'aria-valuetext': `${name} ${pct}%`,
       });
       gauge.style.setProperty('--gauge-color', color);
       gauge.innerHTML = gaugeMarkup(pct);
-      gauge.append(h('span', { class: 'gauge__text' }, `${pct}%`), h('span', { class: 'gauge__label' }, lost ? '判定把握 · Diagnosis' : '可信度 · Confidence'));
+      gauge.append(h('span', { class: 'gauge__text' }, `${pct}%`), h('span', { class: 'gauge__label' }, tr(lost ? 'facts.gaugeDiagnosis' : 'facts.gaugeConfidence')));
       wrap.append(gauge);
     }
     const dl = h('dl', { class: 'facts' });
     const add = (k, v) => { if (v !== '' && v != null) dl.append(h('dt', null, k), h('dd', null, v)); };
-    add('语言', languageFact(view));
+    add(tr('facts.lang'), languageFact(view));
     const steps = stepsOf(best);
-    add('地层数', best ? `${steps.length} 层` : '—');
+    add(tr('facts.strata'), best ? tr('facts.layers', { n: steps.length }) : '—');
     const repairs = best && Array.isArray(best.repairs) ? best.repairs.length : 0;
-    if (best && !lost) add('修复', repairs ? `${repairs} 处` : '无需修补');
-    if (best && best.label) add('结论', best.label);
+    if (best && !lost) add(tr('facts.repairs'), repairs ? tr('facts.repairsN', { n: repairs }) : tr('facts.noRepairs'));
+    if (best && best.label) add(tr('facts.verdict'), best.label);
     if (best && !lost && best.score && Number.isFinite(Number(best.score.value))) {
-      add('可读性', `${formatScore(view.inputScore && view.inputScore.value)} → ${formatScore(best.score.value)}`);
+      add(tr('facts.readability'), `${formatScore(view.inputScore && view.inputScore.value)} → ${formatScore(best.score.value)}`);
     }
     wrap.append(dl);
     return wrap;
@@ -2152,33 +2668,40 @@
     const best = view.best;
     const steps = stepsOf(best);
     if (!steps.length) return null;
-    const ol = h('ol', { class: 'chain', 'aria-label': '误读链路，按时间顺序' });
-    ol.append(h('li', { class: 'chain__node chain__node--origin' }, '原文', h('small', null, truncate(best.output, 10))));
+    const ol = h('ol', { class: 'chain', 'aria-label': tr('chain.aria') });
+    ol.append(h('li', { class: 'chain__node chain__node--origin' }, tr('chain.origin'), h('small', null, truncate(best.output, 10))));
     for (const node of forwardChain(steps)) {
       if (node.kind === 'escape') {
         if (node.from) {
-          ol.append(h('li', { class: 'chain__arrow' }, '编码为'));
-          ol.append(h('li', { class: 'chain__node' }, `${encName(node.from)} 字节`));
+          ol.append(h('li', { class: 'chain__arrow' }, tr('chain.encodedAs')));
+          ol.append(h('li', { class: 'chain__node' }, tr('chain.bytes', { enc: encName(node.from) })));
         }
-        ol.append(h('li', { class: 'chain__arrow' }, '转义为'));
+        ol.append(h('li', { class: 'chain__arrow' }, tr('chain.escapedAs')));
         ol.append(h('li', { class: 'chain__node chain__node--wrong' }, schemeName(node.scheme)));
       } else {
-        ol.append(h('li', { class: 'chain__arrow' }, '编码为'));
-        ol.append(h('li', { class: 'chain__node', title: encZh(node.from) }, encName(node.from)));
-        ol.append(h('li', { class: 'chain__arrow' }, node.lossy ? '误读为（有损）' : '误读为'));
-        ol.append(h('li', { class: 'chain__node chain__node--wrong', title: encZh(node.to) }, encName(node.to)));
+        ol.append(h('li', { class: 'chain__arrow' }, tr('chain.encodedAs')));
+        ol.append(h('li', { class: 'chain__node', title: encDesc(node.from) }, encName(node.from)));
+        ol.append(h('li', { class: 'chain__arrow' }, tr(node.lossy ? 'chain.misreadLossy' : 'chain.misreadAs')));
+        ol.append(h('li', { class: 'chain__node chain__node--wrong', title: encDesc(node.to) }, encName(node.to)));
       }
     }
-    ol.append(h('li', { class: 'chain__arrow' }, '出土'));
+    ol.append(h('li', { class: 'chain__arrow' }, tr('chain.unearthed')));
     ol.append(h('li', { class: 'chain__node chain__node--relic' }, truncate(view.input, 14)));
-    return h('div', { class: 'chain-wrap' }, h('h3', { class: 'mini-title' }, '误读链路 · 按时间顺序'), ol);
+    return h('div', { class: 'chain-wrap' }, h('h3', { class: 'mini-title' }, tr('chain.title')), ol);
   }
 
-  function encZh(id) {
+  // Encoding description in the current language (Codecs.describe(id, locale), §11.3).
+  function encDesc(id) {
     const Codecs = mod('Codecs');
+    const loc = currentLocale();
     try {
+      if (Codecs && typeof Codecs.describe === 'function') {
+        const d = Codecs.describe(id, loc);
+        if (typeof d === 'string' && d) return d;
+      }
       const info = Codecs && Codecs.get ? Codecs.get(id) : null;
-      return info && info.zh ? info.zh : null;
+      const d = info ? info[loc === 'en-US' ? 'en' : 'zh'] : null;
+      return typeof d === 'string' && d ? d : null;
     } catch (_) {
       return null;
     }
@@ -2190,8 +2713,8 @@
     const steps = stepsOf(best);
     const ul = h('ul', { class: 'repairs__list' });
     repairs.slice(0, 12).forEach((r) => ul.append(h('li', { class: 'repair' }, repairLine(r, steps))));
-    if (repairs.length > 12) ul.append(h('li', { class: 'repair' }, `……另有 ${repairs.length - 12} 处修复`));
-    return h('div', { class: 'verdict__block' }, h('h3', { class: 'mini-title' }, '修复记录 · 虚线框为推测补全'), ul);
+    if (repairs.length > 12) ul.append(h('li', { class: 'repair' }, tr('repairs.more', { n: repairs.length - 12 })));
+    return h('div', { class: 'verdict__block' }, h('h3', { class: 'mini-title' }, tr('repairs.title')), ul);
   }
 
   // One entry per distinct hint (the same long hint used to repeat once per match).
@@ -2208,11 +2731,11 @@
         shown.length
           ? h('span', { class: 'signal__matches' },
             shown.map((m) => h('code', null, truncate(m, 16))),
-            more > 0 ? h('span', { class: 'signal__more' }, `…等 ${g.count} 处`) : null)
+            more > 0 ? h('span', { class: 'signal__more' }, tr('signals.more', { n: g.count })) : null)
           : null,
         h('span', { class: 'signal__hint' }, g.hint)));
     });
-    return h('div', { class: 'verdict__block' }, h('h3', { class: 'mini-title' }, '出土时发现的乱码特征'), ul);
+    return h('div', { class: 'verdict__block' }, h('h3', { class: 'mini-title' }, tr('signals.title')), ul);
   }
 
   function renderStats(view) {
@@ -2220,13 +2743,13 @@
     const parts = [];
     const explored = Number(st.explored);
     if (Number.isFinite(explored) && st.explored != null) {
-      if (explored > 0) parts.push(`比对了 ${explored} 种地层假设`);
-      else if (view.status === 'irrecoverable') parts.push('凭名器签名直接认定');
-      else if (view.status === 'clean') parts.push('无需比对：字节与字符严丝合缝');
-      else parts.push('没有可比对的地层假设');
+      if (explored > 0) parts.push(tr('stats.explored', { n: explored }));
+      else if (view.status === 'irrecoverable') parts.push(tr('stats.signature'));
+      else if (view.status === 'clean') parts.push(tr('stats.clean'));
+      else parts.push(tr('stats.none'));
     }
-    if (Number.isFinite(Number(st.ms))) parts.push(`用时 ${Math.round(st.ms)} ms`);
-    if (st.truncated) parts.push('长文本：先在开头样本上找到链路，再推广到全文');
+    if (Number.isFinite(Number(st.ms))) parts.push(tr('stats.ms', { ms: Math.round(st.ms) }));
+    if (st.truncated) parts.push(tr('stats.truncated'));
     return parts.length ? h('p', { class: 'verdict__stats' }, parts.join(' · ')) : null;
   }
 
@@ -2240,9 +2763,7 @@
     const best = view.best;
     const steps = stepsOf(best);
     if (!steps.length) {
-      body.append(h('p', { class: 'strata__empty' }, view.status === 'clean'
-        ? '没有发现任何误读地层：这段文字从出土那一刻起就是它本来的样子。'
-        : '没能确认任何可信的地层。下面是出土原样，留待后来的考古学家。'));
+      body.append(h('p', { class: 'strata__empty' }, tr(view.status === 'clean' ? 'strata.emptyClean' : 'strata.emptyUnknown')));
       body.append(surfaceBand(view.input));
       return;
     }
@@ -2252,19 +2773,19 @@
   }
 
   function surfaceBand(input) {
-    return h('article', { class: 'stratum stratum--surface', 'aria-label': '地表：出土乱码' },
+    return h('article', { class: 'stratum stratum--surface', 'aria-label': tr('strata.surfaceAria') },
       h('div', { class: 'stratum__head' },
-        h('span', { class: 'stratum__no' }, '地表'),
-        h('h3', { class: 'stratum__title' }, '出土乱码（你看到的样子）')),
-      h('div', { class: 'stratum__text', 'data-scroll-label': '出土乱码' }, truncate(input, 600)));
+        h('span', { class: 'stratum__no' }, tr('strata.surface')),
+        h('h3', { class: 'stratum__title' }, tr('strata.surfaceTitle'))),
+      h('div', { class: 'stratum__text', 'data-scroll-label': tr('strata.surfaceLabel') }, truncate(input, 600)));
   }
 
   function bedrockBand(output) {
     const lost = state.view && state.view.status === 'irrecoverable';
-    const title = lost ? '原文已丢失（只剩占位符）' : '原文（还原结果）';
-    return h('article', { class: 'stratum stratum--bedrock', 'aria-label': lost ? '基岩：原文已丢失' : '基岩：原文' },
+    const title = tr(lost ? 'strata.bedrockLost' : 'strata.bedrockTitle');
+    return h('article', { class: 'stratum stratum--bedrock', 'aria-label': tr(lost ? 'strata.bedrockAriaLost' : 'strata.bedrockAria') },
       h('div', { class: 'stratum__head' },
-        h('span', { class: 'stratum__no' }, '基岩'),
+        h('span', { class: 'stratum__no' }, tr('strata.bedrock')),
         h('h3', { class: 'stratum__title' }, title)),
       h('p', Object.assign({ class: 'stratum__fossil', 'data-scroll-label': title }, langAttrs(state.view)), truncate(output, 600)));
   }
@@ -2277,38 +2798,41 @@
     const repairs = Array.isArray(step.repairs) ? step.repairs : [];
 
     const meta = h('span', { class: 'stratum__meta' },
-      step.lossy ? h('span', { class: 'tag tag--lossy' }, '有损') : null,
-      repairs.length ? h('span', { class: 'tag' }, `修复 ${repairs.length} 处`) : null,
+      step.lossy ? h('span', { class: 'tag tag--lossy' }, tr('stratum.lossy')) : null,
+      repairs.length ? h('span', { class: 'tag' }, tr('stratum.repairs', { n: repairs.length })) : null,
       // Escape syntax (%XX, \xNN, hex pairs) is plain ASCII and scores deceptively well, so a
       // before/after readability comparison would only mislead on unescape layers.
       !isUnescape && Number.isFinite(Number(step.scoreBefore)) && Number.isFinite(Number(step.scoreAfter))
-        ? h('span', { class: 'tag', title: '可读性评分：越接近 0 越像正常文字' }, `可读性 ${formatScore(step.scoreBefore)} → ${formatScore(step.scoreAfter)}`)
+        ? h('span', { class: 'tag', title: tr('stratum.readTitle') }, tr('stratum.read', { before: formatScore(step.scoreBefore), after: formatScore(step.scoreAfter) }))
         : null,
       Number.isFinite(Number(step.prior)) && step.prior > 0 && !isUnescape
-        ? h('span', { class: 'tag', title: '这种误读组合在现实中的常见程度' }, `常见度 ${formatPercent(step.prior)}`)
+        ? h('span', { class: 'tag', title: tr('stratum.priorTitle') }, tr('stratum.prior', { pct: formatPercent(step.prior) }))
         : null);
 
     art.append(h('div', { class: 'stratum__head' },
       h('span', { class: 'stratum__no' }, `L${index + 1}`),
-      h('h3', { class: 'stratum__title', id: titleId }, `第 ${index + 1} 层 · ${stepTitle(step)}`),
+      h('h3', { class: 'stratum__title', id: titleId }, tr('stratum.title', { n: index + 1, title: stepTitle(step) })),
       meta));
 
     const model = buildGridModel(step, state.expanded.has(index) ? BYTES_EXPANDED : BYTES_COLLAPSED);
     let explain;
     if (isUnescape) {
       explain = model
-        ? `上排是${schemeName(step.scheme)}写法，解开后得到中排字节，再按 ${encName(step.trueEncoding)} 解读成下排文字。`
-        : `把${schemeName(step.scheme)}写法直接还原成字符。`;
+        ? tr('stratum.explainUnescape', { scheme: schemeName(step.scheme), enc: encName(step.trueEncoding) })
+        : tr('stratum.explainUnescapeDirect', { scheme: schemeName(step.scheme) });
     } else {
-      explain = `把上排字符按 ${encName(step.wrongDecoder)} 重新编码回字节（中排），再用 ${encName(step.trueEncoding)} 正确解读，得到下排。`;
+      explain = tr('stratum.explain', { wrong: encName(step.wrongDecoder), right: encName(step.trueEncoding) });
     }
     art.append(h('p', { class: 'stratum__explain' }, explain));
 
     if (model) {
       art.append(renderByteGrid(model, step, index));
-      art.append(h('p', { class: 'stratum__readout' }, '悬停、点击或用方向键浏览字符，查看它占用的字节。'));
+      art.append(h('p', { class: 'stratum__readout' }, tr('stratum.readout')));
       const foot = h('div', { class: 'stratum__foot' });
-      foot.append(h('span', null, `共 ${model.total} 字节${model.truncated ? `，当前显示前 ${model.shown} 个` : ''}`));
+      foot.append(h('span', null, tr('stratum.total', {
+        n: model.total,
+        more: model.truncated ? tr('stratum.totalShown', { n: model.shown }) : '',
+      })));
       if (model.truncated || state.expanded.has(index)) {
         const expanded = state.expanded.has(index);
         foot.append(h('button', {
@@ -2317,14 +2841,16 @@
           'aria-expanded': String(expanded),
           onclick: () => toggleStratum(index),
         }, expanded
-          ? `收起（只看前 ${BYTES_COLLAPSED} 字节）`
-          : (model.total > BYTES_EXPANDED ? `展开前 ${BYTES_EXPANDED} 字节` : `展开全部 ${model.total} 字节`)));
+          ? tr('stratum.collapse', { n: BYTES_COLLAPSED })
+          : (model.total > BYTES_EXPANDED ? tr('stratum.expandFirst', { n: BYTES_EXPANDED }) : tr('stratum.expandAll', { n: model.total }))));
       }
       art.append(foot);
     } else {
+      const inLabel = tr('stratum.input');
+      const outLabel = tr('stratum.output');
       art.append(h('div', { class: 'stratum__pair' },
-        h('div', null, h('span', { class: 'stratum__pair-label' }, '本层输入'), h('div', { class: 'stratum__text', 'data-scroll-label': '本层输入' }, truncate(step.before, 400))),
-        h('div', null, h('span', { class: 'stratum__pair-label' }, '本层输出'), h('div', { class: 'stratum__text', 'data-scroll-label': '本层输出' }, truncate(step.after, 400)))));
+        h('div', null, h('span', { class: 'stratum__pair-label' }, inLabel), h('div', { class: 'stratum__text', 'data-scroll-label': inLabel }, truncate(step.before, 400))),
+        h('div', null, h('span', { class: 'stratum__pair-label' }, outLabel), h('div', { class: 'stratum__text', 'data-scroll-label': outLabel }, truncate(step.after, 400)))));
     }
     return art;
   }
@@ -2387,7 +2913,8 @@
     let kw = keptWidth(model, chunks);
     if (kw.rem) {
       const band = Math.max(200, (els.strataBody.clientWidth || 600) - 44);
-      const fit = Math.floor((band - 3.2 * 16 - 6 - kw.rem * 16 - kw.px) / (1.7 * 16));
+      const labelRem = currentLocale() === 'en-US' ? 3.9 : 3.2; // .bytegrid --label (styles.css)
+      const fit = Math.floor((band - labelRem * 16 - 6 - kw.rem * 16 - kw.px) / (1.7 * 16));
       const shorter = clamp(fit, 3, per);
       if (shorter < per) {
         per = shorter;
@@ -2398,12 +2925,12 @@
     const wrap = h('div', {
       class: 'bytegrid-scroll',
       role: 'group',
-      'aria-label': `第 ${index + 1} 层字节网格：上排${isUnescape ? '转义写法' : '误读字符'}，中排字节，下排还原字符`,
+      'aria-label': tr('grid.aria', { n: index + 1, top: tr(isUnescape ? 'grid.ariaTopEscape' : 'grid.ariaTopMisread') }),
     });
     wrap.style.setProperty('--per', String(per));
     if (kw.rem) wrap.style.setProperty('--kept-w', `calc(${kw.rem.toFixed(2)}rem + ${kw.px}px)`);
 
-    const topName = isUnescape ? '转义' : '误读';
+    const topName = tr(isUnescape ? 'grid.labelEscape' : 'grid.labelMisread');
     const label = (row, text, title, extra) => {
       const el = h('span', { class: 'bytegrid__label', title, 'aria-hidden': 'true' }, text, extra || null);
       el.style.gridRow = String(row);
@@ -2411,7 +2938,10 @@
     };
 
     const ctx = { model, step, index, byteEls: [], topEls: [], bottomEls: [], pinned: null, chunks };
-    const rowNames = { top: isUnescape ? '转义字符' : `误读字符（${encName(step.wrongDecoder)}）`, bottom: `还原字符（${encName(step.trueEncoding)}）` };
+    const rowNames = {
+      top: isUnescape ? tr('grid.rowEscape') : tr('grid.rowMisread', { enc: encName(step.wrongDecoder) }),
+      bottom: tr('grid.rowRestored', { enc: encName(step.trueEncoding) }),
+    };
     const keptCodec = encName(isUnescape ? step.trueEncoding : step.wrongDecoder);
     const pending = { top: [], bottom: [] };
 
@@ -2420,10 +2950,10 @@
       grid.style.gridTemplateColumns = chunkTemplate(chunk);
       const off = chunk.start.toString(16).toUpperCase();
       grid.append(
-        label(1, topName, isUnescape ? schemeName(step.scheme) : `按 ${encName(step.wrongDecoder)} 误读`),
-        label(2, '字节', `十六进制字节，从第 ${chunk.start} 字节（0x${off}）起`,
+        label(1, topName, isUnescape ? schemeName(step.scheme) : tr('grid.titleMisread', { enc: encName(step.wrongDecoder) })),
+        label(2, tr('grid.labelBytes'), tr('grid.titleBytes', { n: chunk.start, off }),
           chunks.length > 1 ? h('span', { class: 'bytegrid__off' }, `0x${off.padStart(2, '0')}`) : null),
-        label(3, '还原', `按 ${encName(step.trueEncoding)} 解读`));
+        label(3, tr('grid.labelRestored'), tr('grid.titleRestored', { enc: encName(step.trueEncoding) })));
       for (let b = chunk.start; b < chunk.end; b++) {
         const cell = h('span', { class: model.bytes[b] >= 0x80 ? 'bg-byte is-high' : 'bg-byte', 'aria-hidden': 'true' }, model.hex[b]);
         cell.style.gridColumn = String(chunkByteColumn(chunk, b));
@@ -2458,7 +2988,7 @@
       // Characters the wrong decoder could not encode: they passed through this layer untouched.
       const chars = Array.from(it.text);
       const shown = chars.length > KEPT_DISPLAY_MAX ? `${chars.slice(0, KEPT_DISPLAY_MAX).join('')}…` : it.text;
-      const desc = `原样保留「${it.text}」：无法按 ${keptCodec} 编码，未参与本层误读`;
+      const desc = tr('grid.kept', { text: it.text, codec: keptCodec });
       el = h('button', {
         type: 'button',
         class: `bg-kept bg-kept--${row}`,
@@ -2473,8 +3003,8 @@
       el = h('button', {
         type: 'button',
         class: `bg-gap bg-gap--${row}${atEnd ? ' bg-gap--end' : ''}`,
-        'aria-label': `缺口：这里原本有字节在流转中丢失（${row === 'top' ? '输入中显示为' : '此处为'}「${it.text || '空'}」）`,
-        title: '缺口：原本在这里的 1～2 个字节已经丢失',
+        'aria-label': tr('grid.gapAria', { where: tr(row === 'top' ? 'grid.gapWhereTop' : 'grid.gapWhereBottom'), text: it.text || tr('grid.gapEmpty') }),
+        title: tr('grid.gapTitle'),
       }, h('span', { class: 'bg-gap__badge', 'aria-hidden': 'true' }, badge));
       el.style.gridColumn = String(col);
     } else {
@@ -2489,12 +3019,19 @@
       if (it.clipped) classes.push('is-clipped');
       if (it.unchanged) classes.push('is-unchanged');
       const hex = hexOf(model.bytes, it.start, Math.min(it.end, model.total));
-      const cands = it.candidates && it.candidates.length ? `；候选：${it.candidates.join('、')}` : '';
+      const cands = it.candidates && it.candidates.length ? tr('common.cands', { list: it.candidates.join(tr('common.listSep')) }) : '';
       el = h('button', {
         type: 'button',
         class: classes.join(' '),
-        'aria-label': `${rowName}「${it.text}」，字节 ${hex}${it.repaired ? `，推测修复${cands}` : ''}${it.error ? '，无法解码' : ''}${it.unchanged ? '，原样保留' : ''}`,
-        title: it.repaired ? `修复字符${cands || ''}` : d.title,
+        'aria-label': tr('grid.charAria', {
+          row: rowName,
+          text: it.text,
+          hex,
+          repaired: it.repaired ? tr('grid.charRepaired', { cands }) : '',
+          error: it.error ? tr('grid.charError') : '',
+          kept: it.unchanged ? tr('grid.charKept') : '',
+        }),
+        title: it.repaired ? tr('grid.charTitleRepaired', { cands: cands || '' }) : d.title,
       }, d.text);
       const startCol = chunkByteColumn(chunk, it.start);
       const lastByte = Math.max(it.start, Math.min(it.end, model.shown, chunk.end) - 1);
@@ -2575,29 +3112,32 @@
     if (!out) return;
     const step = ctx.step;
     const rowLabel = el.dataset.row === 'top'
-      ? (step.kind === 'unescape' ? '转义写法' : `${encName(step.wrongDecoder)} 误读出`)
-      : `${encName(step.trueEncoding)} 解读出`;
-    const otherText = shared.map((o) => (o.gap ? '（缺口）' : o.text)).join('');
+      ? (step.kind === 'unescape' ? tr('readout.rowEscape') : tr('readout.rowMisread', { enc: encName(step.wrongDecoder) }))
+      : tr('readout.rowRestored', { enc: encName(step.trueEncoding) });
+    const otherText = shared.map((o) => (o.gap ? tr('readout.gapOther') : o.text)).join('');
     out.textContent = '';
     if (item.kept) {
       const codec = encName(step.kind === 'unescape' ? step.trueEncoding : step.wrongDecoder);
-      out.append(`原样保留「${truncate(item.text, 80)}」：这些字符无法按 ${codec} 编码，没有参与本层误读，上下两排完全相同。`);
+      out.append(tr('readout.kept', { text: truncate(item.text, 80), codec }));
       return;
     }
     if (item.gap) {
-      out.append(`缺口：输入里的「${item.text || '？'}」没有对应字节——这里原本有 1～2 个字节在流转中丢失。`);
-      if (otherText) out.append(`对侧推测修复为「${otherText}」。`);
+      out.append(tr('readout.gap', { text: item.text || tr('readout.gapUnknown') }));
+      if (otherText) out.append(tr('readout.gapRepair', { text: otherText }));
       return;
     }
     const hex = hexOf(ctx.model.bytes, item.start, Math.min(item.end, ctx.model.total));
+    const cands = item.candidates && item.candidates.length
+      ? tr('readout.cands', { list: item.candidates.join(tr('common.listSep')) })
+      : '';
     out.append(
-      `${rowLabel}「${item.text}」（${codepointLabel(item.text)}） ← 字节 `,
+      tr('readout.char', { row: rowLabel, text: item.text, cp: codepointLabel(item.text) }),
       h('code', null, hex + (item.clipped ? ' …' : '')),
-      otherText ? `；对侧共享这些字节的是「${otherText}」` : '',
-      item.repaired ? `；这是推测修复的字符${item.candidates && item.candidates.length ? `，候选：${item.candidates.join('、')}` : ''}` : '',
-      item.error ? '；这些字节无法按该编码解读（U+FFFD）' : '',
-      item.unchanged ? '；这段文字原样保留，没有参与本层误读' : '',
-      '。');
+      otherText ? tr('readout.shared', { text: otherText }) : '',
+      item.repaired ? tr('readout.repaired', { cands }) : '',
+      item.error ? tr('readout.error') : '',
+      item.unchanged ? tr('readout.unchanged') : '',
+      tr('readout.end'));
   }
 
   function onGridPointer(e) {
@@ -2684,7 +3224,10 @@
 
   // ---------- alternatives & signatures ----------
 
-  const RANKS = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];
+  // Rank seals of the second opinions (甲乙丙… / A B C…).
+  function ranks() {
+    return Array.from(tr('alts.ranks'));
+  }
 
   function renderAlternatives() {
     const list = els.altsList;
@@ -2695,20 +3238,19 @@
     // A clean text has nothing to compare; an empty "second opinions" panel is just filler.
     els.alternatives.hidden = !!view && view.status === 'clean';
     const unsolved = !!state.result && state.result.status === 'unknown';
-    if (els.altsTitle) els.altsTitle.textContent = unsolved ? '低可信度猜测' : '其他考古学家的看法';
+    if (els.altsTitle) els.altsTitle.textContent = tr(unsolved ? 'alts.titleGuesses' : 'alts.title');
     const hyps = hypotheses(state.result);
     if (hyps.length <= 1) {
-      list.append(h('li', { class: 'alts__empty' }, hyps.length
-        ? '其他考古学家一致同意这个结论，没有提出别的看法。'
-        : '暂无可供比较的候选结论。'));
+      list.append(h('li', { class: 'alts__empty' }, tr(hyps.length ? 'alts.agree' : 'alts.none')));
       return;
     }
     const engineHasBest = !!state.result.best;
     const { main, more, threshold } = partitionAlternatives(hyps, engineHasBest);
+    const RANKS = ranks();
     const item = (i) => {
       const hyp = hyps[i];
       const current = state.viewIndex === i || (state.viewIndex == null && engineHasBest && i === 0);
-      const label = hyp.label || chainSentence(stepsOf(hyp)) || '未命名链路';
+      const label = hyp.label || chainSentence(stepsOf(hyp)) || tr('alts.unnamed');
       const pct = formatPercent(hyp.confidence);
       const bar = h('span');
       bar.style.width = pct;
@@ -2717,12 +3259,12 @@
         class: 'alt__btn',
         'data-index': String(i),
         'aria-current': current ? 'true' : null,
-        'aria-label': `${current ? '当前展示' : '改为采纳'}：${truncate(hyp.output, 40)}，${label}，可信度 ${pct}`,
+        'aria-label': tr('alts.aria', { state: tr(current ? 'alts.current' : 'alts.adopt'), output: truncate(hyp.output, 40), label, pct }),
         onclick: () => promote(i),
       },
       h('span', { class: 'alt__rank', 'aria-hidden': 'true' }, RANKS[i] || String(i + 1)),
       h('span', { class: 'alt__out', dir: 'auto' }, truncate(hyp.output, 60)),
-      h('span', { class: 'alt__label' }, `${i === 0 && engineHasBest ? '首席结论 · ' : ''}${label}`),
+      h('span', { class: 'alt__label' }, `${i === 0 && engineHasBest ? tr('alts.chief') : ''}${label}`),
       h('span', { class: 'alt__conf' }, pct, h('span', { class: 'alt__bar', 'aria-hidden': 'true' }, bar)));
       return { li: h('li', { class: 'alt' }, btn), current };
     };
@@ -2737,7 +3279,7 @@
       inner.append(it.li);
     });
     const details = h('details', { class: 'alts__more' },
-      h('summary', null, `另有 ${more.length} 个低可信度猜测（<${Math.round(threshold * 100)}%）`),
+      h('summary', null, tr('alts.more', { n: more.length, pct: Math.round(threshold * 100) })),
       inner);
     details.open = holdsCurrent;
     list.after(details);
@@ -2757,7 +3299,7 @@
     startNarration();
     const btn = els.alternatives.querySelector(`.alt__btn[data-index="${index}"]`);
     if (btn) btn.focus();
-    announce(normalized == null ? '已恢复首席结论。' : `已改为采纳第 ${index + 1} 种看法：${truncate(state.view.best.output, 40)}`);
+    announce(normalized == null ? tr('alts.backToChief') : tr('alts.adopted', { n: index + 1, output: truncate(state.view.best.output, 40) }));
   }
 
   function renderSignatures() {
@@ -2770,8 +3312,8 @@
     els.signatures.hidden = false;
     sigs.forEach((s) => {
       els.sigList.append(h('li', { class: 'sig-plaque' },
-        h('span', { class: 'sig-plaque__seal', 'aria-hidden': 'true' }, '名器'),
-        h('h3', { class: 'sig-plaque__title' }, s.title || s.id || '无名名器'),
+        h('span', { class: 'sig-plaque__seal', 'aria-hidden': 'true' }, tr('sig.seal')),
+        h('h3', { class: 'sig-plaque__title' }, s.title || s.id || tr('sig.untitled')),
         // The plaque title is often the relic itself (锟斤拷); do not print it twice.
         s.match && s.match !== s.title ? h('code', { class: 'sig-plaque__match' }, truncate(s.match, 40)) : null,
         s.note ? h('p', { class: 'sig-plaque__note' }, s.note) : null));
@@ -2784,7 +3326,7 @@
     const Narrator = mod('Narrator');
     if (Narrator && typeof Narrator.narrate === 'function') {
       try {
-        const n = Narrator.narrate(view, { style: state.style, seed: state.seed });
+        const n = Narrator.narrate(view, { style: state.style, seed: state.seed, locale: currentLocale() });
         if (n && Array.isArray(n.sections)) return n;
       } catch (err) {
         if (typeof console !== 'undefined') console.error('[MBX] Narrator.narrate failed', err);
@@ -2797,24 +3339,28 @@
   function fallbackNarration(view) {
     const best = view.best;
     const steps = stepsOf(best);
-    const copy = STATUS_COPY[view.status];
-    const sections = [{ id: 'opening', heading: '开场', text: '各位来宾好！今天的值班讲解员临时请假（讲解模块未能加载），由这块备用展签为您简单介绍。' }];
+    const copy = copyFor(view.status);
+    const sections = [{ id: 'opening', heading: tr('fallback.opening'), text: tr('fallback.openingText') }];
     if (best) {
-      sections.push({ id: 'identify', heading: '鉴定结论', text: `这件文物原本写的是「**${truncate(best.output, 40)}**」。它的遭遇是：${chainSentence(steps) || '一次未知的误读'}。` });
+      sections.push({
+        id: 'identify',
+        heading: tr('fallback.identify'),
+        text: tr('fallback.identifyText', { output: truncate(best.output, 40), chain: chainSentence(steps) || tr('fallback.unknownChain') }),
+      });
       const step = steps[0];
       const rows = step ? charMapRows(step, 3) : [];
       if (rows.length) {
-        const sample = rows.map((r) => `「${r.after}」的字节 \`${r.hex}\` 被读成了「${r.before}」`).join('；');
-        sections.push({ id: 'mechanism', heading: '作案手法', text: `${sample}。字节一个没少，只是被换了一本错误的字典来查。` });
+        const sample = rows.map((r) => tr('fallback.sample', { after: r.after, hex: r.hex, before: r.before })).join(tr('fallback.sampleSep'));
+        sections.push({ id: 'mechanism', heading: tr('fallback.mechanism'), text: tr('fallback.mechanismText', { sample }) });
       }
     } else {
-      sections.push({ id: 'identify', heading: '鉴定结论', text: copy.desc });
+      sections.push({ id: 'identify', heading: tr('fallback.identify'), text: copy.desc });
     }
-    sections.push({ id: 'closing', heading: '文物保护建议', text: '全链路统一使用 UTF-8，并在 HTTP 头、数据库连接与文件元数据里明确声明编码——这样就不会再有新的文物出土了。' });
+    sections.push({ id: 'closing', heading: tr('fallback.closing'), text: tr('fallback.closingText') });
     const narration = {
       exhibitId: fallbackExhibitId(view.input),
-      title: best ? `『${best.label || '误读文物'}』` : `『${copy.label}』`,
-      subtitle: '备用展签 · 简易讲解',
+      title: tr('fallback.title', { label: best ? best.label || tr('fallback.misread') : copy.label }),
+      subtitle: tr('fallback.subtitle'),
       era: null,
       site: '',
       tags: [],
@@ -2830,18 +3376,23 @@
     const info = styleInfo(state.style);
     const n = state.narration;
     const d = n && n.docent && (!n.style || n.style === info.id) ? n.docent : null;
+    const fallbackName = tr('docent.default');
     return {
       avatar: (d && d.avatar) || info.avatar || '🧑‍🏫',
-      name: d && d.name ? `${d.name} · ${d.styleName || info.name || '讲解员'}` : (info.name || '讲解员'),
-      shortName: (d && d.name) || info.name || '讲解员',
+      name: d && d.name ? `${d.name} · ${d.styleName || info.name || fallbackName}` : (info.name || fallbackName),
+      shortName: (d && d.name) || info.name || fallbackName,
     };
   }
 
-  function updateDocentIdentity(statusText) {
+  // status: a string, or a function re-evaluated after a language switch; omitted = keep it.
+  function updateDocentIdentity(status) {
     const who = currentDocent();
     els.docentAvatar.textContent = who.avatar;
     els.docentName.textContent = who.name;
-    if (statusText) els.docentStatus.textContent = statusText;
+    if (status) state.docentStatus = status;
+    const s = state.docentStatus;
+    const text = typeof s === 'function' ? s() : s;
+    if (text) els.docentStatus.textContent = text;
   }
 
   function renderStyleSwitch() {
@@ -2860,7 +3411,7 @@
     state.style = info.id;
     for (const radio of els.styleSwitch.querySelectorAll('input[name="docentStyle"]')) radio.checked = radio.value === info.id;
     if (!state.view) {
-      updateDocentIdentity(info.tagline || '正在候场');
+      updateDocentIdentity(() => styleInfo(info.id).tagline || tr('docent.status.waiting'));
       return;
     }
     state.narration = computeNarration(state.view);
@@ -2876,18 +3427,18 @@
       // The 字节测年 section tells the same story in full; keep the reasoning one click away.
       if (n.era.reason) {
         dd.append(h('details', { class: 'narr-meta__why' },
-          h('summary', null, '依据'),
+          h('summary', null, tr('narr.why')),
           renderInline(h('p'), n.era.reason)));
       }
-      meta.append(h('dt', null, '年代'), dd);
+      meta.append(h('dt', null, tr('narr.era')), dd);
     }
-    if (n.site) meta.append(h('dt', null, '出土地点'), renderInline(h('dd'), n.site));
+    if (n.site) meta.append(h('dt', null, tr('narr.site')), renderInline(h('dd'), n.site));
     const tags = Array.isArray(n.tags) && n.tags.length
-      ? h('ul', { class: 'tag-list', 'aria-label': '标签' }, n.tags.slice(0, 8).map((t) => h('li', { class: 'tag' }, String(t))))
+      ? h('ul', { class: 'tag-list', 'aria-label': tr('narr.tags') }, n.tags.slice(0, 8).map((t) => h('li', { class: 'tag' }, String(t))))
       : null;
     const head = h('header', { class: 'narr-head' },
-      h('p', { class: 'narr-head__no' }, `展品编号 ${n.exhibitId || currentExhibitId()}`),
-      h('h3', { class: 'narr-head__title' }, n.title || '无名展品'),
+      h('p', { class: 'narr-head__no' }, tr('narr.exhibitNo', { id: n.exhibitId || currentExhibitId() })),
+      h('h3', { class: 'narr-head__title' }, n.title || tr('narr.untitled')),
       n.subtitle ? renderInline(h('p', { class: 'narr-head__sub' }), n.subtitle) : null,
       meta.childNodes.length ? meta : null,
       tags);
@@ -2896,7 +3447,14 @@
     state.narrBody = body;
   }
 
-  function startNarration() {
+  /*
+   * opts.animate === false: no typewriter (used when the language switches under a finished tour).
+   * opts.ai === false: do not request the AI docent this time, even if it is switched on (a
+   * language switch after the AI tour finished or was stopped would otherwise spend quota).
+   */
+  function startNarration(opts) {
+    const animate = !(opts && opts.animate === false) && motionOn();
+    const allowAi = !(opts && opts.ai === false);
     stopTypewriter();
     abortAi();
     stopSpeech();
@@ -2911,14 +3469,16 @@
     // endpoint that just failed (network, CORS, auth, config) is not retried on every new dig.
     const aiWanted = state.prefs.ai && llmReady();
     const failed = aiWanted && aiConfigFailed();
-    els.aiToggle.checked = aiWanted && state.aiAuto && !failed;
-    if (aiWanted && state.aiAuto && !failed) {
+    const runIt = aiWanted && state.aiAuto && !failed && allowAi;
+    els.aiToggle.checked = runIt;
+    if (runIt) {
       runAi();
       return;
     }
-    if (failed) showAiNotice('刚才没能联络上 AI 讲解员，这次先由馆内讲解员讲解；修改设置或重新打开"AI 讲解员"开关即可再试。');
-    else if (aiWanted) showAiNotice('这件展品来自分享链接，为免自动消耗你的 AI 额度，先由馆内讲解员讲解；打开"AI 讲解员"开关即可改请 AI。');
-    typeNarration(state.narration, motionOn());
+    if (failed) showAiNotice(tr('ai.noticeFailed'));
+    else if (aiWanted && !state.aiAuto) showAiNotice(tr('ai.noticeShared'));
+    else if (aiWanted) showAiNotice(tr('ai.noticeLangSwitch'));
+    typeNarration(state.narration, animate);
   }
 
   // provider|baseUrl|model of the saved AI config, used to remember an endpoint that failed.
@@ -2954,7 +3514,7 @@
     if (!animate || !secs.length) {
       renderAll();
       els.narration.setAttribute('aria-busy', 'false');
-      updateDocentIdentity('讲解完毕，欢迎提问');
+      updateDocentIdentity(() => tr('docent.status.done'));
       updateDocentSticky();
       return;
     }
@@ -2969,7 +3529,7 @@
     els.narration.setAttribute('aria-busy', 'true');
     els.skipType.hidden = false;
     els.docentAvatar.classList.add('is-talking');
-    updateDocentIdentity('正在讲解…');
+    updateDocentIdentity(() => tr('docent.status.talking'));
 
     const typer = {
       raf: 0,
@@ -2985,7 +3545,7 @@
         els.narration.setAttribute('aria-busy', 'false');
         els.skipType.hidden = true;
         if (!state.speaking) els.docentAvatar.classList.remove('is-talking');
-        updateDocentIdentity('讲解完毕，欢迎提问');
+        updateDocentIdentity(() => tr('docent.status.done'));
         updateDocentSticky();
       },
     };
@@ -3034,7 +3594,7 @@
     const narrationText = state.narrMode === 'ai' && state.ai.text.trim() ? state.ai.text : narrationPlainText(state.narration);
     return buildMarkdownReport({
       view: state.view, narrationText, exhibitId: currentExhibitId(), date: new Date(),
-      engineBest: state.result ? state.result.best : null,
+      engineBest: state.result ? state.result.best : null, locale: currentLocale(),
     });
   }
 
@@ -3050,11 +3610,7 @@
 
   // ---------- AI docent ----------
 
-  const AI_PHASES = {
-    connecting: '正在接通 AI 讲解员……',
-    thinking: 'AI 讲解员正在翻阅档案、构思讲稿……',
-    writing: 'AI 讲解员开讲了……',
-  };
+  const AI_PHASES = ['connecting', 'thinking', 'writing'];
 
   function llmReady() {
     const LLM = mod('LLM');
@@ -3118,17 +3674,18 @@
 
     const body = state.narrBody;
     body.textContent = '';
-    const box = h('div', { class: 'narr-ai' }, h('p', null, 'AI 讲解员正在整理讲稿……'));
+    const locale = currentLocale();
+    const box = h('div', { class: 'narr-ai' }, h('p', null, tr('ai.preparing')));
     body.append(box);
     els.stopAi.hidden = false;
     els.narration.setAttribute('aria-busy', 'true');
     els.docentAvatar.classList.add('is-talking');
-    updateDocentIdentity('AI 讲解员正在现场讲解…');
+    updateDocentIdentity(() => tr('ai.live'));
 
     let facts = null;
     try {
       const Narrator = mod('Narrator');
-      facts = Narrator && typeof Narrator.factsFor === 'function' ? Narrator.factsFor(view) : null;
+      facts = Narrator && typeof Narrator.factsFor === 'function' ? Narrator.factsFor(view, { locale }) : null;
     } catch (_) { facts = null; }
 
     let paintQueued = false;
@@ -3137,15 +3694,14 @@
     const onStatus = (phase, detail) => {
       if (runId !== ai.runId) return;
       if (phase === 'fallback') {
-        const to = detail && detail.to ? `（${detail.to}）` : '';
-        showAiNotice(`服务端已改由备用模型${to}继续讲解。`);
+        const to = detail && detail.to ? tr('ai.serverFallbackTo', { to: detail.to }) : '';
+        showAiNotice(tr('ai.serverFallback', { to }));
         return;
       }
-      const label = AI_PHASES[phase];
-      if (label && !ai.text) {
+      if (AI_PHASES.includes(phase) && !ai.text) {
         box.textContent = '';
-        box.append(h('p', null, label));
-        updateDocentIdentity(label);
+        box.append(h('p', null, tr(`ai.phase.${phase}`)));
+        updateDocentIdentity(() => tr(`ai.phase.${phase}`));
       }
     };
     const paint = () => {
@@ -3158,6 +3714,7 @@
     try {
       const res = await LLM.narrate(view, {
         style: state.style,
+        locale,
         narration: state.narration,
         facts,
         signal: controller ? controller.signal : undefined,
@@ -3174,28 +3731,28 @@
       if (runId !== ai.runId) return;
       const text = res && typeof res.text === 'string' && res.text.trim() ? res.text : ai.text;
       if (!text.trim()) {
-        const err = new Error('AI 讲解员没有返回任何内容。');
+        const err = new Error(tr('ai.empty'));
         err.code = 'bad_response';
         throw err;
       }
       ai.text = text;
       renderMarkdownLite(box, text);
       const who = [providerName(res && res.provider), res && res.model].filter(Boolean).join(' · ');
-      body.append(h('p', { class: 'narr-foot' }, `由 ${who || 'AI'} 现场讲解；技术细节以地层剖面中的字节数据为准。`));
+      body.append(h('p', { class: 'narr-foot' }, tr('ai.foot', { who: who || 'AI' })));
       if (isTruncatedStop(res && res.stopReason)) {
         // max_tokens / length: the docent was cut off mid-sentence; do not present it as complete.
-        showAiNotice('AI 讲解因长度上限被截断，以上为已生成部分。');
-        updateDocentIdentity('AI 讲解被截断');
+        showAiNotice(tr('ai.truncated'));
+        updateDocentIdentity(() => tr('ai.truncatedStatus'));
       } else {
-        updateDocentIdentity('AI 讲解完毕，欢迎提问');
+        updateDocentIdentity(() => tr('ai.done'));
       }
     } catch (err) {
       if (runId !== ai.runId) return;
       const aborted = err && (err.code === 'aborted' || err.name === 'AbortError');
       if (aborted && ai.userStopped && ai.text.trim()) {
         renderMarkdownLite(box, ai.text);
-        showAiNotice('AI 讲解已停止，以上是已经讲到的部分。');
-        updateDocentIdentity('AI 讲解已停止');
+        showAiNotice(tr('ai.stoppedPartial'));
+        updateDocentIdentity(() => tr('ai.stoppedStatus'));
       } else {
         ai.text = '';
         if (!aborted && aiFailureBlocksRetry(err)) {
@@ -3203,7 +3760,7 @@
           state.ai.failedKey = aiConfigKey();
           els.aiToggle.checked = false;
         }
-        showAiNotice(aborted ? 'AI 讲解已停止，已换回馆内讲解员。' : aiErrorMessage(err));
+        showAiNotice(aborted ? tr('ai.stoppedFallback') : aiErrorMessage(err));
         typeNarration(state.narration, motionOn());
       }
     } finally {
@@ -3227,9 +3784,14 @@
     if (els.speakBtn.hidden && state.speaking) stopSpeech();
   }
 
-  function pickVoice(synth) {
+  function pickVoice(synth, speechLang) {
     let voices = [];
     try { voices = synth.getVoices() || []; } catch (_) { voices = []; }
+    if (/^en/i.test(speechLang)) {
+      return voices.find((v) => /^en[-_]US/i.test(v.lang))
+        || voices.find((v) => /^en/i.test(v.lang))
+        || null;
+    }
     return voices.find((v) => /^zh[-_](CN|Hans)/i.test(v.lang))
       || voices.find((v) => /^zh/i.test(v.lang))
       || null;
@@ -3238,21 +3800,23 @@
   function speakText(text) {
     const synth = window.speechSynthesis;
     if (!synth || typeof window.SpeechSynthesisUtterance !== 'function') {
-      toast('这台设备的浏览器不支持语音合成。');
+      toast(tr('speech.unsupported'));
       return;
     }
-    const chunks = splitForSpeech(text, 160);
+    const locale = currentLocale();
+    const speechLang = localeInfo(locale).speech || locale;
+    const chunks = splitForSpeech(text, 160, locale);
     if (!chunks.length) {
-      toast('还没有可以朗读的讲解。');
+      toast(tr('speech.empty'));
       return;
     }
     try { synth.cancel(); } catch (_) { /* ignore */ }
     const id = ++state.speechId;
-    const voice = pickVoice(synth);
+    const voice = pickVoice(synth, speechLang);
     const done = () => { if (id === state.speechId) setSpeaking(false); };
     chunks.forEach((chunk, i) => {
       const u = new window.SpeechSynthesisUtterance(chunk);
-      u.lang = 'zh-CN';
+      u.lang = speechLang;
       if (voice) u.voice = voice;
       u.rate = 1.02;
       if (i === chunks.length - 1) u.onend = done;
@@ -3272,7 +3836,7 @@
 
   function setSpeaking(on) {
     state.speaking = on;
-    els.speakBtn.textContent = on ? '⏹ 停止朗读' : '🔊 语音导览';
+    els.speakBtn.textContent = tr(on ? 'docent.speakStop' : 'docent.speak');
     els.speakBtn.setAttribute('aria-pressed', String(on));
     if (on) els.docentAvatar.classList.add('is-talking');
     else if (!state.typer && !state.ai.controller) els.docentAvatar.classList.remove('is-talking');
@@ -3295,7 +3859,7 @@
       input: safeSlice(result.input, HISTORY_INPUT_CAP),
       output: rescued ? truncate(best.output, 300) : '',
       status: result.status,
-      label: (best && best.label) || STATUS_COPY[result.status].label,
+      label: (best && best.label) || copyFor(result.status).label,
       exhibitId: currentExhibitId(),
       ts: Date.now(),
     };
@@ -3313,10 +3877,16 @@
     const t = Date.now();
     list.forEach((item) => {
       const status = normalizeStatus(item.status);
+      const statusLabel = copyFor(status).label;
       const btn = h('button', {
         type: 'button',
         class: 'cab-card',
-        'aria-label': `重新打开 ${item.exhibitId || ''}：${truncate(item.input, 30)}${item.output ? ` → ${truncate(item.output, 30)}` : ''}（${STATUS_COPY[status].label}）`,
+        'aria-label': tr('cabinet.reopen', {
+          id: item.exhibitId || '',
+          input: truncate(item.input, 30),
+          output: item.output ? ` → ${truncate(item.output, 30)}` : '',
+          label: statusLabel,
+        }),
         onclick: () => {
           els.relicInput.value = item.input;
           updateCount();
@@ -3325,7 +3895,7 @@
       },
       h('span', { class: `cab-card__dot cab-card__dot--${status}`, 'aria-hidden': 'true' }),
       h('span', { class: 'cab-card__in' }, truncate(item.input, 60)),
-      h('span', { class: 'cab-card__out' }, item.output ? truncate(item.output, 60) : STATUS_COPY[status].label),
+      h('span', { class: 'cab-card__out' }, item.output ? truncate(item.output, 60) : statusLabel),
       h('span', { class: 'cab-card__meta' }, h('span', null, item.exhibitId || ''), h('time', { datetime: new Date(item.ts).toISOString() }, relativeTime(item.ts, t))));
       els.historyList.append(h('li', null, btn));
     });
@@ -3336,20 +3906,20 @@
     if (!state.clearArmed) {
       state.clearArmed = setTimeout(() => {
         state.clearArmed = 0;
-        els.historyClear.textContent = '清空展柜';
+        els.historyClear.textContent = tr('cabinet.clear');
       }, 3500);
-      els.historyClear.textContent = '再点一次确认清空';
+      els.historyClear.textContent = tr('cabinet.clearConfirm');
       return;
     }
     clearTimeout(state.clearArmed);
     state.clearArmed = 0;
-    els.historyClear.textContent = '清空展柜';
+    els.historyClear.textContent = tr('cabinet.clear');
     try {
       const s = storage();
       if (s) s.removeItem(HISTORY_KEY);
     } catch (_) { /* ignore */ }
     renderHistory();
-    toast('展柜已清空');
+    toast(tr('cabinet.cleared'));
     // The clear button just hid itself: keep focus where it was instead of jumping to the top.
     els.historyEmpty.tabIndex = -1;
     els.historyEmpty.focus({ preventScroll: true });
@@ -3360,33 +3930,49 @@
   function encodingChoices() {
     const Codecs = mod('Codecs');
     const list = Codecs && Array.isArray(Codecs.ENCODINGS) ? Codecs.ENCODINGS.filter((e) => e && e.id && e.available !== false) : [];
-    if (list.length) return list.map((e) => ({ id: e.id, name: e.name || e.id, zh: e.zh || '' }));
-    return FALLBACK_ENCODINGS.map(([id, name]) => ({ id, name, zh: '' }));
+    if (list.length) return list.map((e) => ({ id: e.id, name: e.name || e.id, desc: encDesc(e.id) || '' }));
+    return FALLBACK_ENCODINGS.map(([id, name]) => ({ id, name, desc: '' }));
   }
 
   function encodingSelect(value, labelText, cls, onChange) {
     const sel = h('select', { class: cls, 'aria-label': labelText, onchange: onChange });
     const choices = encodingChoices();
-    if (value && !choices.some((c) => c.id === value)) choices.unshift({ id: value, name: encName(value), zh: '' });
-    for (const c of choices) sel.append(h('option', { value: c.id, title: c.zh || null }, c.name));
+    if (value && !choices.some((c) => c.id === value)) choices.unshift({ id: value, name: encName(value), desc: '' });
+    for (const c of choices) sel.append(h('option', { value: c.id, title: c.desc || null }, c.name));
     sel.value = value;
     return sel;
   }
 
+  // Recipes in the current language (Forge.presets(locale), §11.3); chains and samples are data.
   function forgePresets() {
     const Forge = mod('Forge');
-    return Forge && Array.isArray(Forge.PRESETS) ? Forge.PRESETS.filter((p) => p && p.id && Array.isArray(p.chain) && p.chain.length) : [];
+    if (!Forge) return [];
+    const loc = currentLocale();
+    let list = null;
+    if (typeof Forge.presets === 'function') {
+      try { list = Forge.presets(loc); } catch (_) { list = null; }
+    }
+    if (!Array.isArray(list)) list = Array.isArray(Forge.PRESETS) ? localizeRecords(Forge.PRESETS, ['name', 'story'], loc) : [];
+    return list.filter((p) => p && p.id && Array.isArray(p.chain) && p.chain.length);
+  }
+
+  // (Re)fills the recipe select, keeping the current choice.
+  function fillPresetSelect() {
+    const presets = forgePresets();
+    const keep = els.forgePreset.value;
+    els.forgePreset.textContent = '';
+    els.forgePreset.append(h('option', { value: '' }, tr('forge.custom')));
+    presets.forEach((p) => els.forgePreset.append(h('option', { value: p.id }, p.name || p.id)));
+    els.forgePreset.value = presets.some((p) => p.id === keep) ? keep : '';
+    return presets;
   }
 
   function setupForge() {
     const Forge = mod('Forge');
-    const presets = forgePresets();
-    els.forgePreset.textContent = '';
-    els.forgePreset.append(h('option', { value: '' }, '— 自定义配方 —'));
-    presets.forEach((p) => els.forgePreset.append(h('option', { value: p.id }, p.name || p.id)));
+    const presets = fillPresetSelect();
 
     els.forgePreset.addEventListener('change', () => {
-      const p = presets.find((x) => x.id === els.forgePreset.value);
+      const p = forgePresets().find((x) => x.id === els.forgePreset.value);
       if (p) applyPreset(p, true);
       else markCustom();
     });
@@ -3402,7 +3988,7 @@
       e.preventDefault();
       runForge();
     });
-    els.forgeCopy.addEventListener('click', () => copyWithToast(els.forgeOutput.value, '赝品已复制'));
+    els.forgeCopy.addEventListener('click', () => copyWithToast(els.forgeOutput.value, tr('forge.copied')));
     els.forgeSend.addEventListener('click', () => {
       const out = els.forgeOutput.value;
       if (!out) return;
@@ -3412,17 +3998,18 @@
     });
 
     if (!Forge || typeof Forge.corrupt !== 'function') {
-      els.forgeError.textContent = '赝品工坊的设备（src/forge.js）尚未就位，暂时无法做旧。';
-      els.forgeError.hidden = false;
+      state.forgeLast = { kind: 'missing' };
+      showForgeError(tr('forge.missing'));
     }
 
     if (presets.length) {
       els.forgePreset.value = presets[0].id;
       applyPreset(presets[0], true);
     } else {
-      els.forgeText.value = '大家好，欢迎光临编码博物馆！';
+      els.forgeText.value = tr('forge.sample');
       state.forgeLayers = [{ encoding: 'utf-8', misreadAs: 'windows-1252' }];
-      els.forgeStory.textContent = '经典配方清单暂缺，可以自己组合。';
+      state.forgeStoryKey = 'forge.noPresets';
+      els.forgeStory.textContent = tr(state.forgeStoryKey);
       renderForgeLayers();
     }
   }
@@ -3430,7 +4017,8 @@
   // Any hand edit turns the recipe into a custom one; the preset's story no longer applies.
   function markCustom() {
     els.forgePreset.value = '';
-    els.forgeStory.textContent = '自由配方：自己决定每一层的"原编码 → 误读为"。';
+    state.forgeStoryKey = 'forge.customStory';
+    els.forgeStory.textContent = tr(state.forgeStoryKey);
   }
 
   function applyPreset(p, fillSample) {
@@ -3439,8 +4027,29 @@
     const opts = p.opts || {};
     els.forgeDrop.checked = !!opts.dropInvisible;
     els.forgeNbsp.checked = !!opts.nbspToSpace;
+    state.forgeStoryKey = null;
     els.forgeStory.textContent = p.story || '';
     renderForgeLayers();
+  }
+
+  function showForgeError(message) {
+    els.forgeError.textContent = message;
+    els.forgeError.hidden = false;
+  }
+
+  // Language switch: recipe names and story, layer labels, and the last result or error.
+  function relocalizeForge() {
+    const presets = fillPresetSelect();
+    const p = presets.find((x) => x.id === els.forgePreset.value);
+    if (p) els.forgeStory.textContent = p.story || '';
+    else els.forgeStory.textContent = tr(state.forgeStoryKey || 'forge.customStory');
+    renderForgeLayers();
+    const last = state.forgeLast;
+    if (!last) return;
+    if (last.kind === 'run' && (!els.forgeOutputWrap.hidden || !els.forgeError.hidden)) runForge(last);
+    else if (last.kind === 'missing' || last.kind === 'needText') {
+      if (!els.forgeError.hidden) showForgeError(tr(last.kind === 'missing' ? 'forge.missing' : 'forge.needText'));
+    }
   }
 
   function renderForgeLayers() {
@@ -3452,8 +4061,8 @@
       const remove = h('button', {
         type: 'button',
         class: 'btn btn--ghost btn--small forge-layer__remove',
-        'aria-label': `删除第 ${i + 1} 层`,
-        title: `删除第 ${i + 1} 层`,
+        'aria-label': tr('forge.removeLayer', { n: i + 1 }),
+        title: tr('forge.removeLayer', { n: i + 1 }),
         disabled: state.forgeLayers.length <= 1,
         onclick: () => {
           state.forgeLayers.splice(i, 1);
@@ -3463,41 +4072,43 @@
         },
       }, '×');
       list.append(h('li', { class: 'forge-layer' },
-        h('span', { class: 'forge-layer__no' }, `第 ${i + 1} 层`),
-        encodingSelect(layer.encoding, `第 ${i + 1} 层：原编码`, 'forge-layer__from', onFrom),
-        h('span', { class: 'forge-layer__arrow', 'aria-hidden': 'true' }, '→ 误读为 →'),
-        encodingSelect(layer.misreadAs, `第 ${i + 1} 层：误读为`, 'forge-layer__to', onTo),
+        h('span', { class: 'forge-layer__no' }, tr('forge.layerNo', { n: i + 1 })),
+        encodingSelect(layer.encoding, tr('forge.layerFrom', { n: i + 1 }), 'forge-layer__from', onFrom),
+        h('span', { class: 'forge-layer__arrow', 'aria-hidden': 'true' }, tr('forge.arrow')),
+        encodingSelect(layer.misreadAs, tr('forge.layerTo', { n: i + 1 }), 'forge-layer__to', onTo),
         remove));
     });
     els.forgeAddLayer.disabled = state.forgeLayers.length >= 3;
   }
 
-  function runForge() {
+  // replay: the inputs of an earlier run, re-rendered quietly in the current language.
+  function runForge(replay) {
     const Forge = mod('Forge');
     els.forgeError.hidden = true;
     if (!Forge || typeof Forge.corrupt !== 'function') {
-      els.forgeError.textContent = '赝品工坊的设备（src/forge.js）尚未就位，暂时无法做旧。';
-      els.forgeError.hidden = false;
+      state.forgeLast = { kind: 'missing' };
+      showForgeError(tr('forge.missing'));
       return;
     }
-    const text = els.forgeText.value;
+    const text = replay ? replay.text : els.forgeText.value;
     if (!text) {
-      els.forgeError.textContent = '先写一段原文，才能把它做旧。';
-      els.forgeError.hidden = false;
+      state.forgeLast = { kind: 'needText' };
+      showForgeError(tr('forge.needText'));
       els.forgeText.focus();
       return;
     }
-    const chain = state.forgeLayers.map((l) => ({ encoding: l.encoding, misreadAs: l.misreadAs }));
+    const chain = replay ? replay.chain : state.forgeLayers.map((l) => ({ encoding: l.encoding, misreadAs: l.misreadAs }));
+    const opts = replay ? replay.opts : { dropInvisible: els.forgeDrop.checked, nbspToSpace: els.forgeNbsp.checked };
+    state.forgeLast = { kind: 'run', text, chain, opts };
     let res;
     try {
-      res = Forge.corrupt(text, chain, { dropInvisible: els.forgeDrop.checked, nbspToSpace: els.forgeNbsp.checked });
+      res = Forge.corrupt(text, chain, Object.assign({}, opts, { locale: currentLocale() }));
     } catch (err) {
       res = { ok: false, error: err && err.message ? err.message : String(err) };
     }
     if (!res || !res.ok) {
-      const where = res && Number.isInteger(res.layerIndex) ? `第 ${res.layerIndex + 1} 层失败：` : '';
-      els.forgeError.textContent = `做旧失败。${where}${(res && res.error) || '未知原因'}`;
-      els.forgeError.hidden = false;
+      const where = res && Number.isInteger(res.layerIndex) ? tr('forge.layerFailed', { n: res.layerIndex + 1 }) : '';
+      showForgeError(tr('forge.failed', { where, error: (res && res.error) || tr('common.unknownReason') }));
       els.forgeOutputWrap.hidden = true;
       return;
     }
@@ -3505,11 +4116,11 @@
     els.forgeTrace.textContent = '';
     (res.layers || []).forEach((l, i) => {
       els.forgeTrace.append(h('li', null,
-        `第 ${i + 1} 层 · ${encName(l.encoding)} → 误读为 ${encName(l.misreadAs)}：`,
+        tr('forge.trace', { n: i + 1, from: encName(l.encoding), to: encName(l.misreadAs) }),
         h('code', null, truncate(l.output, 48))));
     });
     els.forgeOutputWrap.hidden = false;
-    announce(`赝品已出炉：${truncate(res.output, 40)}`);
+    if (!replay) announce(tr('forge.ready', { output: truncate(res.output, 40) }));
   }
 
   // ---------- settings drawer ----------
@@ -3534,7 +4145,7 @@
     if (!LLM) return [];
     try {
       if (typeof LLM.listProviders === 'function') {
-        const list = LLM.listProviders();
+        const list = LLM.listProviders(currentLocale());
         if (Array.isArray(list)) return list.map(normalizeProvider).filter(Boolean);
       }
     } catch (_) { /* fall back to the static table */ }
@@ -3563,7 +4174,7 @@
     els.toggleKey.addEventListener('click', () => {
       const show = els.setKey.type === 'password';
       els.setKey.type = show ? 'text' : 'password';
-      els.toggleKey.textContent = show ? '隐藏' : '显示';
+      els.toggleKey.textContent = tr(show ? 'settings.hide' : 'settings.show');
       els.toggleKey.setAttribute('aria-pressed', String(show));
     });
     els.testConn.addEventListener('click', onTestConnection);
@@ -3573,9 +4184,81 @@
     // Never keep a revealed key on screen after the drawer closes.
     els.settingsDialog.addEventListener('close', () => {
       els.setKey.type = 'password';
-      els.toggleKey.textContent = '显示';
+      els.toggleKey.textContent = tr('settings.show');
       els.toggleKey.setAttribute('aria-pressed', 'false');
     });
+  }
+
+  /*
+   * Test-result line: from the dictionary (re-rendered on a language switch) or raw text.
+   * `raw` = { ok, cls } marks a line that quotes llm.js's own message, worded in the language of
+   * the test: a language switch replaces it with a short dictionary line instead of re-running
+   * the test (no network call, no stale language on screen).
+   */
+  function setTestResult(key, params, cls, raw) {
+    state.testMsg = key ? { key, params: params || null, cls: cls || '' } : null;
+    state.testRaw = key && raw ? raw : null;
+    els.testResult.textContent = key ? tr(key, params) : '';
+    els.testResult.className = cls ? `test-result ${cls}` : 'test-result';
+  }
+
+  function setTestResultText(text, cls, raw) {
+    state.testMsg = null;
+    state.testRaw = text && raw ? raw : null;
+    els.testResult.textContent = text;
+    els.testResult.className = cls ? `test-result ${cls}` : 'test-result';
+  }
+
+  function fillProviderSelect(providers) {
+    const value = els.setProvider.value;
+    els.setProvider.textContent = '';
+    els.setProvider.append(h('option', { value: 'none' }, tr('settings.providerNone')));
+    providers.forEach((p) => els.setProvider.append(h('option', { value: p.id }, p.name)));
+    return value;
+  }
+
+  function fillStyleSelect() {
+    els.setStyle.textContent = '';
+    stylesList().forEach((s) => els.setStyle.append(h('option', { value: s.id }, s.name || s.id)));
+  }
+
+  // Language switch while the drawer is open: relabel options, keep every unsaved value.
+  function relabelSettings() {
+    const providers = providerList();
+    const provider = fillProviderSelect(providers);
+    els.setProvider.value = provider && (provider === 'none' || providers.some((p) => p.id === provider)) ? provider : 'none';
+    const style = els.setStyle.value;
+    fillStyleSelect();
+    els.setStyle.value = style || state.style;
+    applyProviderUi(providerById(els.setProvider.value), false);
+    const msg = state.testMsg;
+    const raw = state.testRaw;
+    if (raw) setTestResult(raw.ok ? 'settings.testOkStale' : 'settings.testFailStale', null, raw.cls);
+    else if (msg) setTestResult(msg.key, msg.params, msg.cls);
+    else if (!mod('LLM')) setTestResult('settings.llmMissing');
+    else setTestResultText('', '');
+  }
+
+  // { modelId: label } in the current language (LLM.modelLabels(locale), §11.3).
+  function modelLabels() {
+    const LLM = mod('LLM');
+    if (!LLM) return {};
+    const loc = currentLocale();
+    try {
+      if (typeof LLM.modelLabels === 'function') {
+        const m = LLM.modelLabels(loc);
+        if (m && typeof m === 'object') return m;
+      }
+    } catch (_) { /* fall back to the static table */ }
+    const base = LLM.MODEL_LABELS && typeof LLM.MODEL_LABELS === 'object' ? LLM.MODEL_LABELS : {};
+    if (loc === 'zh-CN') return base;
+    // Chinese-only labels: keep the model name, drop the Chinese note.
+    const out = {};
+    for (const k of Object.keys(base)) {
+      const v = String(base[k]).replace(/\s*[（(][^）)]*[）)]\s*$/, '').trim();
+      if (v && !/[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]/.test(v)) out[k] = v;
+    }
+    return out;
   }
 
   function loadLlmConfig() {
@@ -3591,9 +4274,7 @@
   function fillSettingsForm() {
     const cfg = loadLlmConfig();
     const providers = providerList();
-    els.setProvider.textContent = '';
-    els.setProvider.append(h('option', { value: 'none' }, '不使用（仅内置讲解员）'));
-    providers.forEach((p) => els.setProvider.append(h('option', { value: p.id }, p.name)));
+    fillProviderSelect(providers);
     const known = cfg.provider && (cfg.provider === 'none' || providers.some((p) => p.id === cfg.provider));
     els.setProvider.value = known ? cfg.provider : 'none';
     state.settingsProvider = els.setProvider.value;
@@ -3606,18 +4287,14 @@
     els.setEffort.value = ['low', 'medium', 'high'].includes(cfg.effort) ? cfg.effort : 'medium';
     applyProviderUi(providerById(els.setProvider.value), false);
 
-    els.setStyle.textContent = '';
-    stylesList().forEach((s) => els.setStyle.append(h('option', { value: s.id }, s.name || s.id)));
+    fillStyleSelect();
     els.setStyle.value = state.style;
     els.setAnimation.checked = state.prefs.animation;
     els.setVoice.checked = state.prefs.voice;
     const radio = els.settingsForm.querySelector(`input[name="setTheme"][value="${state.prefs.theme}"]`);
     if (radio) radio.checked = true;
-    els.testResult.textContent = '';
-    els.testResult.className = 'test-result';
-    if (!mod('LLM')) {
-      els.testResult.textContent = 'AI 模块（src/llm.js）未加载，只能使用内置讲解员。';
-    }
+    setTestResult(null);
+    if (!mod('LLM')) setTestResult('settings.llmMissing');
   }
 
   function applyProviderUi(provider, fillDefaults) {
@@ -3631,16 +4308,15 @@
     if (els.effortHint) els.effortHint.hidden = !effortless;
     els.modelList.textContent = '';
     if (none) return;
-    const LLM = mod('LLM');
-    const labels = LLM && LLM.MODEL_LABELS && typeof LLM.MODEL_LABELS === 'object' ? LLM.MODEL_LABELS : {};
+    const labels = modelLabels();
     provider.models.forEach((m) => els.modelList.append(h('option', { value: m, label: labels[m] || null })));
     if (fillDefaults) {
       els.setBaseUrl.value = provider.defaultBaseUrl || '';
       els.setModel.value = provider.defaultModel || '';
     }
-    els.setBaseUrl.placeholder = provider.defaultBaseUrl || '例如 https://api.deepseek.com/v1 或 http://localhost:11434/v1';
-    els.setModel.placeholder = provider.defaultModel || '例如 deepseek-chat、qwen-plus、llama3';
-    els.setKey.placeholder = provider.needsKey ? '粘贴你的 API 密钥' : '此提供方可不填密钥';
+    els.setBaseUrl.placeholder = provider.defaultBaseUrl || tr('settings.baseUrlPh');
+    els.setModel.placeholder = provider.defaultModel || tr('settings.modelPh');
+    els.setKey.placeholder = tr(provider.needsKey ? 'settings.keyPh' : 'settings.keyOptionalPh');
   }
 
   function settingsFormFields() {
@@ -3652,9 +4328,6 @@
     };
   }
 
-  const KEY_CLEARED_MSG = '已切换提供方：密钥已清空，请为新端点重新填写。';
-  const KEY_HOST_MSG = '端点已改动：为免把密钥发往别处，原密钥已清空，请为新端点重新填写。';
-
   function onProviderChange() {
     // A key typed for one provider never follows the form to another provider's endpoint;
     // URL/model are replaced only when the visitor had not customised them.
@@ -3665,8 +4338,7 @@
     els.setModel.value = next.model;
     state.settingsProvider = els.setProvider.value;
     state.keyFromStore = next.keyRestored;
-    els.testResult.textContent = next.keyCleared ? KEY_CLEARED_MSG : '';
-    els.testResult.className = 'test-result';
+    setTestResult(next.keyCleared ? 'settings.keyCleared' : null);
   }
 
   /*
@@ -3679,8 +4351,7 @@
     if (!keyNeedsReentry(form, loadLlmConfig(), providerList())) return false;
     els.setKey.value = '';
     state.keyFromStore = false;
-    els.testResult.textContent = KEY_HOST_MSG;
-    els.testResult.className = 'test-result is-bad';
+    setTestResult('settings.keyHost', null, 'is-bad');
     return true;
   }
 
@@ -3715,8 +4386,7 @@
   async function onTestConnection() {
     const LLM = mod('LLM');
     if (!LLM || typeof LLM.testConnection !== 'function') {
-      els.testResult.textContent = 'AI 模块未加载，无法测试。';
-      els.testResult.className = 'test-result is-bad';
+      setTestResult('settings.testNoLlm', null, 'is-bad');
       return;
     }
     if (guardKeyForEndpoint()) {
@@ -3725,15 +4395,22 @@
     }
     const cfg = readSettingsForm();
     els.testConn.disabled = true;
-    els.testResult.className = 'test-result';
-    els.testResult.textContent = '正在联络讲解员……';
+    setTestResult('settings.testing');
+    // llm.js words its message in the language the test started in; if the visitor switches
+    // meanwhile, show the dictionary verdict in the new language instead.
+    const loc = currentLocale();
     try {
-      const res = await LLM.testConnection(cfg);
-      els.testResult.textContent = (res && res.message) || (res && res.ok ? '连接成功。' : '连接失败。');
-      els.testResult.className = `test-result ${res && res.ok ? 'is-ok' : 'is-bad'}`;
+      const res = await LLM.testConnection(cfg, loc);
+      const ok = !!(res && res.ok);
+      const cls = ok ? 'is-ok' : 'is-bad';
+      if (res && typeof res.message === 'string' && res.message && currentLocale() === loc) setTestResultText(res.message, cls, { ok, cls });
+      else setTestResult(ok ? 'settings.testOk' : 'settings.testFail', null, cls);
     } catch (err) {
-      els.testResult.textContent = err && err.message ? `连接失败：${err.message}` : '连接失败。';
-      els.testResult.className = 'test-result is-bad';
+      if (err && err.message && currentLocale() === loc) {
+        setTestResult('settings.testFailMsg', { message: err.message }, 'is-bad', { ok: false, cls: 'is-bad' });
+      } else {
+        setTestResult('settings.testFail', null, 'is-bad');
+      }
     } finally {
       els.testConn.disabled = els.setProvider.value === 'none';
     }
@@ -3755,8 +4432,7 @@
     state.keyFromStore = false;
     state.ai.failedKey = '';
     updateAiToggle();
-    els.testResult.textContent = '已清除本机保存的 AI 设置与密钥。';
-    els.testResult.className = 'test-result is-ok';
+    setTestResult('settings.cleared', null, 'is-ok');
   }
 
   function saveSettings() {
@@ -3775,7 +4451,7 @@
         LLM.saveConfig(cfg);
       } catch (err) {
         llmSaved = false;
-        toast(`AI 设置保存失败：${err && err.message ? err.message : '未知原因'}`);
+        toast(tr('settings.saveFailed', { message: err && err.message ? err.message : tr('common.unknownReason') }));
       }
     }
 
@@ -3791,7 +4467,7 @@
     updateVoiceButton();
     updateAiToggle();
     closeSettings();
-    if (llmSaved) toast(!wasReady && llmReady() ? '设置已保存：在讲解员面板打开"AI 讲解员"开关即可启用。' : '设置已保存');
+    if (llmSaved) toast(tr(!wasReady && llmReady() ? 'settings.savedAi' : 'settings.saved'));
 
     if (state.prefs.style !== prevStyle) setStyle(state.prefs.style);
   }
